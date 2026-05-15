@@ -1,0 +1,140 @@
+name: Release Knowledge Base
+
+on:
+    workflow_dispatch:
+        inputs:
+            branch:
+                description: 'Branch to build from'
+                required: true
+                default: 'main'
+            release_tag:
+                description: 'Release tag (e.g. kb-2026-04-22)'
+                required: true
+
+permissions:
+    contents: write
+
+jobs:
+    build-and-release-kb:
+        name: Build and Release kb.db
+        runs-on: [ollama, self-hosted]
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  ref: ${{ github.event.inputs.branch }}
+                  fetch-depth: 0
+
+            - name: Clean build artifacts from previous runs
+              run: rm -rf bin/ pgedge-ai-kb-builder examples/pgedge-ai-kb-builder-build.yaml
+
+            - name: Validate allowed build ref
+              env:
+                  BUILD_REF: ${{ github.event.inputs.branch }}
+              run: |
+                  if [[ ! "$BUILD_REF" =~ ^(main|release/[A-Za-z0-9._-]+)$ ]]; then
+                    echo "Ref '$BUILD_REF' is not allowed for secret-backed release workflow"
+                    exit 1
+                  fi
+
+            - name: Set up Go
+              uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+              with:
+                  go-version: '1.25'
+                  cache: true
+
+            - name: Configure git for private repo access
+              env:
+                  PGEDGE_BUILDER_TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  [ -n "$PGEDGE_BUILDER_TOKEN" ] || { echo "PGEDGE_BUILDER_TOKEN secret is missing"; exit 1; }
+                  echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+                  printf '' > "$RUNNER_TEMP/gitconfig"
+                  GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global credential.helper ""
+                  GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global url."https://x-access-token:${PGEDGE_BUILDER_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+            - name: Start Ollama service
+              run: |
+                  ollama serve &
+                  echo $! > "$RUNNER_TEMP/ollama.pid"
+                  timeout=60; elapsed=0
+                  until curl -s http://localhost:11434/api/tags > /dev/null; do
+                    sleep 2; elapsed=$((elapsed + 2))
+                    if [ "$elapsed" -ge "$timeout" ]; then echo "Ollama did not start within ${timeout}s"; exit 1; fi
+                  done
+                  ollama pull nomic-embed-text
+                  echo "Ollama ready with nomic-embed-text"
+
+            - name: Build kb-builder binary
+              run: CGO_ENABLED=0 go build -o pgedge-ai-kb-builder ./cmd/kb-builder
+
+            - name: Setup API keys for kb-builder
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
+                  [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
+                  mkdir -p "$API_KEYS_DIR"
+                  printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
+                  printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
+                  chmod 600 "$API_KEYS_DIR"/*
+
+            - name: Configure kb-builder for cloud providers
+              env:
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  cp examples/pgedge-ai-kb-builder.yaml examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' 's|git@github.com:|https://github.com/|g' examples/pgedge-ai-kb-builder-build.yaml
+                  grep -q 'database_path: "bin/kb.db"' examples/pgedge-ai-kb-builder-build.yaml || { echo "database_path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "OpenAI key path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "Voyage key path replacement failed"; exit 1; }
+                  grep -q 'https://github.com/' examples/pgedge-ai-kb-builder-build.yaml || { echo "SSH URL replacement failed"; exit 1; }
+
+            - name: Generate kb.db
+              run: |
+                  mkdir -p bin
+                  ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+
+            - name: Verify kb.db was created
+              run: |
+                  if [ ! -f "bin/kb.db" ]; then
+                    echo "Error: bin/kb.db was not created"
+                    exit 1
+                  fi
+                  echo "kb.db size: $(du -sh bin/kb.db | cut -f1)"
+
+            - name: Cleanup
+              if: always()
+              env:
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  if [ -f "$RUNNER_TEMP/ollama.pid" ]; then
+                    kill "$(cat "$RUNNER_TEMP/ollama.pid")" 2>/dev/null || true
+                    rm -f "$RUNNER_TEMP/ollama.pid"
+                  fi
+                  rm -rf "$API_KEYS_DIR"
+                  rm -f "$RUNNER_TEMP/gitconfig"
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+              with:
+                  tag_name: ${{ github.event.inputs.release_tag }}
+                  name: Knowledge Base ${{ github.event.inputs.release_tag }}
+                  body: |
+                      Knowledge base database built from branch `${{ github.event.inputs.branch }}`.
+
+                      This release contains only `kb.db` for use by downstream consumers such as
+                      the pgEdge Postgres MCP Server and the pgEdge AI DBA Workbench.
+                  files: bin/kb.db
+                  draft: false
+                  prerelease: false
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

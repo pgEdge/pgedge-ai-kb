@@ -1,0 +1,91 @@
+name: CI - KB Builder
+
+on:
+    push:
+        branches: [ main, develop ]
+    pull_request:
+        branches: [ main, develop ]
+
+jobs:
+    kb-builder:
+        name: KB Builder
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+            - name: Set up Go
+              uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+              with:
+                  go-version: '1.25'
+                  cache: false
+
+            - name: Cache Go modules
+              uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+              with:
+                  path: |
+                      ~/go/pkg/mod
+                      ~/.cache/go-build
+                  key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
+                  restore-keys: |
+                      ${{ runner.os }}-go-1.25-
+
+            - name: Verify dependencies
+              run: go mod verify
+
+            - name: Download dependencies
+              run: go mod download
+
+            - name: Lint code
+              uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
+              with:
+                  version: v2.5.0
+                  args: --timeout=5m ./cmd/... ./internal/...
+
+            - name: Run go vet
+              run: go vet ./cmd/... ./internal/...
+
+            - name: Check formatting
+              run: |
+                  gofmt -l ./cmd ./internal > /tmp/gofmt.out
+                  if [ -s /tmp/gofmt.out ]; then
+                    echo "The following files are not formatted:"
+                    cat /tmp/gofmt.out
+                    exit 1
+                  fi
+
+            - name: Build kb-builder
+              run: |
+                  mkdir -p bin
+                  go build -v -o bin/pgedge-ai-kb-builder ./cmd/kb-builder
+
+            - name: Verify binary
+              run: |
+                  ls -lh bin/pgedge-ai-kb-builder
+                  file bin/pgedge-ai-kb-builder
+                  ./bin/pgedge-ai-kb-builder --help
+
+            - name: Run unit tests
+              run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./cmd/... ./internal/...
+
+            - name: Generate coverage report
+              run: |
+                  go tool cover -html=coverage.out -o coverage.html
+                  go tool cover -func=coverage.out
+
+            - name: Upload build artifact
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: pgedge-ai-kb-builder-linux-amd64
+                  path: bin/pgedge-ai-kb-builder
+                  retention-days: 7
+
+            - name: Upload coverage artifact
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: coverage
+                  path: |
+                      coverage.html
+                      coverage.out
+                  retention-days: 7

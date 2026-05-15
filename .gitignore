@@ -1,0 +1,56 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+/pgedge-ai-kb-builder
+
+# Output of the go coverage tool
+*.out
+coverage.html
+coverage.txt
+coverage.xml
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AI
+.claude/settings.local.json
+
+# Docs
+site/
+
+# Knowledgebase databases (build artifacts)
+*.db
+*.sqlite
+*.sqlite3
+
+# Cached doc sources fetched at build time
+doc-source/
+bin-doc-source/
+
+# Build artifacts
+examples/pgedge-ai-kb-builder-build.yaml

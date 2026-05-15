@@ -1,0 +1,47 @@
+# GoReleaser configuration for arm64 architecture
+# This builds only arm64 binaries on native arm64 runner
+# https://goreleaser.com
+
+version: 2
+
+before:
+    hooks:
+        - go fmt ./...
+        - go mod tidy
+
+builds:
+    # KB Builder - arm64 (all platforms, pure Go)
+    - id: pgedge-ai-kb-builder-arm64
+      binary: pgedge-ai-kb-builder
+      main: ./cmd/kb-builder
+      env:
+          - CGO_ENABLED=0
+      goos:
+          - linux
+          - darwin
+      goarch:
+          - arm64
+      ldflags:
+          - -s -w
+          - -X main.version={{.Version}}
+          - -X main.commit={{.Commit}}
+          - -X main.date={{.Date}}
+          - -X main.builtBy=goreleaser
+
+archives:
+    # KB Builder archive for arm64
+    - id: kb-builder-arm64
+      builds:
+          - pgedge-ai-kb-builder-arm64
+      name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_arm64"
+      files:
+          - README.md
+          - LICENSE.md
+          - examples/pgedge-ai-kb-builder.yaml
+
+snapshot:
+    version_template: "{{ incpatch .Version }}-next"
+
+# Disable release creation - will be done in final job
+release:
+    disable: true

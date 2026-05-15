@@ -1,0 +1,86 @@
+site_name: pgEdge AI Knowledgebase Builder
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+  - macros:
+      j2_variable_start_string: "<<"
+      j2_variable_end_string: ">>"
+      j2_comment_start_string: "<#"
+      j2_comment_end_string: "#>"
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  favicon: img/favicon.ico
+
+  logo_dark_mode: 'img/logo-dark.png'
+  logo_light_mode: 'img/logo-light.png'
+
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.prune
+    - navigation.top
+    - toc.follow
+    - content.tabs.link
+
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+extra:
+  generator: false
+
+copyright: Copyright &copy; 2025 - 2026 pgEdge, Inc
+repo_url: https://github.com/pgEdge/pgedge-ai-kb
+
+nav:
+  - About the Knowledgebase Builder:
+      - pgEdge AI Knowledgebase Builder: index.md
+  - User Guide:
+      - Quick Start: guide/quickstart.md
+      - Installation: guide/installation.md
+      - Building a Knowledgebase: guide/building.md
+      - Configuring Sources: guide/sources.md
+      - Configuring Embedding Providers: guide/embeddings.md
+      - Output Database Layout: guide/output-db.md
+      - Troubleshooting: guide/troubleshooting.md
+  - Reference:
+      - Configuration File Reference: reference/config.md
+  - Contributing:
+      - Development Setup: contributing/development.md
+      - Architecture: contributing/architecture.md
+      - Testing: contributing/testing.md
+      - CI/CD: contributing/ci-cd.md
+  - pgEdge AI Knowledgebase Builder Release Notes: changelog.md
+  - Licence: LICENSE.md

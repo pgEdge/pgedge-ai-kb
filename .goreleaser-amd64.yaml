@@ -1,0 +1,51 @@
+# GoReleaser configuration for x86_64 (amd64) architecture
+# This builds only amd64 binaries on native x86_64 runner
+# https://goreleaser.com
+
+version: 2
+
+before:
+    hooks:
+        - go fmt ./...
+        - go mod tidy
+
+builds:
+    # KB Builder - amd64 (all platforms, pure Go)
+    - id: pgedge-ai-kb-builder-amd64
+      binary: pgedge-ai-kb-builder
+      main: ./cmd/kb-builder
+      env:
+          - CGO_ENABLED=0
+      goos:
+          - linux
+          - darwin
+          - windows
+      goarch:
+          - amd64
+      ldflags:
+          - -s -w
+          - -X main.version={{.Version}}
+          - -X main.commit={{.Commit}}
+          - -X main.date={{.Date}}
+          - -X main.builtBy=goreleaser
+
+archives:
+    # KB Builder archive for x86_64
+    - id: kb-builder-amd64
+      builds:
+          - pgedge-ai-kb-builder-amd64
+      name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_x86_64"
+      format_overrides:
+          - goos: windows
+            format: zip
+      files:
+          - README.md
+          - LICENSE.md
+          - examples/pgedge-ai-kb-builder.yaml
+
+snapshot:
+    version_template: "{{ incpatch .Version }}-next"
+
+# Disable release creation - will be done in final job
+release:
+    disable: true

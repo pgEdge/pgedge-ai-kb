@@ -1,0 +1,376 @@
+name: Check Sources Against SSOT
+
+# Runs daily (or manually) to detect drift between pgedge-ai-kb-builder.yaml
+# and the canonical sources.yaml in pgEdge/pgedge-doc-sources.
+# If actionable drift is found (missing entries or SSH URLs), opens or updates
+# a dedicated fix PR on auto/sync-kb-builder. Never comments on developer PRs.
+# EXTRA and policy-excluded entries are reported but never auto-removed.
+
+on:
+  #schedule:
+  #  - cron: '0 6 * * *'   # daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  check-sources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch SSOT
+        env:
+          SSOT_TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+        run: |
+          if [ -z "${SSOT_TOKEN}" ]; then
+            echo "::error::PGEDGE_BUILDER_TOKEN secret is not set"
+            exit 1
+          fi
+          curl -sSf \
+            -H "Authorization: token ${SSOT_TOKEN}" \
+            https://raw.githubusercontent.com/pgEdge/pgedge-doc-sources/main/sources.yaml \
+            -o /tmp/sources.yaml
+          pip install pyyaml -q
+
+      - name: Detect drift and generate fixes
+        id: drift
+        run: |
+          python3 << 'PYEOF'
+          import os, re, yaml
+
+          CONSUMER_TYPE = "kb-builder"
+          CONSUMER_FILE = "examples/pgedge-ai-kb-builder.yaml"
+          GLOBAL_MAX_VERSIONS = 3
+
+          def normalize_url(url):
+              """Normalize for key comparison only — lowercased."""
+              url = re.sub(r"^git@github\.com:", "https://github.com/", url)
+              url = url.rstrip("/")
+              if not url.endswith(".git"):
+                  url += ".git"
+              return url.lower()
+
+          def clean_url(url):
+              """Canonical HTTPS URL for output — preserves original casing."""
+              url = re.sub(r"^git@github\.com:", "https://github.com/", url)
+              url = url.rstrip("/")
+              if not url.endswith(".git"):
+                  url += ".git"
+              return url
+
+          def for_consumer(entry):
+              tools = entry.get("tools")
+              return tools is None or CONSUMER_TYPE in tools
+
+          def ssot_key(entry):
+              raw = entry.get("kb_git_source") or entry.get("upstream_git_source", "")
+              url = normalize_url(raw)
+              ref = (entry.get("kb_tag") or entry.get("kb_branch")
+                     or entry.get("upstream_tag") or entry.get("upstream_branch", ""))
+              doc_path = entry.get("kb_doc_path") or entry.get("upstream_doc_path", "")
+              return (url, ref, doc_path)
+
+          def version_key(v):
+              parts = re.split(r"[.\-_]", str(v))
+              return [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in parts]
+
+          with open("/tmp/sources.yaml") as f:
+              ssot = yaml.safe_load(f)
+          with open(CONSUMER_FILE) as f:
+              consumer_text = f.read()
+              consumer = yaml.safe_load(consumer_text)
+
+          global_max = ssot.get("defaults", {}).get("max_versions", GLOBAL_MAX_VERSIONS)
+
+          # Group SSOT entries by component, apply max_versions cutoff
+          groups = {}
+          for e in ssot["sources"]:
+              if not for_consumer(e):
+                  continue
+              gk = (e.get("name", ""), normalize_url(e.get("upstream_git_source", "")))
+              groups.setdefault(gk, []).append(e)
+
+          ssot_map, excluded = {}, {}
+          for entries in groups.values():
+              versioned = sorted(
+                  [e for e in entries if e.get("version", "")],
+                  key=lambda entry: version_key(entry.get("version", "")),
+                  reverse=True,
+              )
+              for e in entries:
+                  if not e.get("version", ""):
+                      ssot_map[ssot_key(e)] = e
+              for i, e in enumerate(versioned):
+                  key = ssot_key(e)
+                  (ssot_map if i < e.get("max_versions", global_max) else excluded)[key] = e
+
+          # Build consumer map
+          consumer_map, url_issues = {}, []
+          for s in consumer.get("sources", []):
+              if "local_path" in s:
+                  continue
+              raw = s.get("git_url", "")
+              if raw.startswith("git@"):
+                  url_issues.append((s.get("project_name", "?"), raw))
+              url = normalize_url(raw)
+              ref = s.get("tag") or s.get("branch", "")
+              key = (url, ref, s.get("doc_path", ""))
+              consumer_map[key] = s
+
+          missing_entries = {k: e for k, e in ssot_map.items() if k not in consumer_map}
+          extra_entries   = {k: s for k, s in consumer_map.items() if k not in ssot_map and k not in excluded}
+          policy_entries  = {k: s for k, s in consumer_map.items() if k in excluded}
+
+          # ── Build drift report ──────────────────────────────────────────
+          lines = ["## Sources Drift Report — kb-builder\n"]
+          clean = not missing_entries and not extra_entries and not url_issues
+
+          url_lines = [
+              f"  - **URL** `{name}` — SSH `{raw}`, should be HTTPS"
+              for name, raw in url_issues
+          ]
+          missing_lines = [
+              f"  - **MISSING** `{e.get('id','?')}` ({e.get('name','?')} {e.get('version','')}) — "
+              f"ref `{k[1]}`, doc_path `{k[2]}`"
+              for k, e in missing_entries.items()
+          ]
+          extra_lines = [
+              f"  - **EXTRA** `{s.get('project_name','?')}` — "
+              f"ref `{k[1]}`, doc_path `{k[2]}` (not in SSOT, left as-is)"
+              for k, s in extra_entries.items()
+          ]
+          policy_lines = [
+              f"  - **POLICY-EXCLUDED** `{s.get('project_name','?')}` "
+              f"v{s.get('project_version','?')} — beyond max_versions cutoff in SSOT"
+              for k, s in policy_entries.items()
+          ]
+
+          actionable = bool(missing_entries or url_issues)
+
+          if clean:
+              lines.append("**No drift detected.** Consumer config is in sync with SSOT.")
+          else:
+              if url_lines:
+                  lines += ["### URL Issues (SSH → HTTPS)\n"] + url_lines + [""]
+              if missing_lines:
+                  lines += ["### Missing from consumer (in SSOT, absent here)\n"] + missing_lines + [""]
+              if extra_lines:
+                  lines += ["### Extra in consumer (not in SSOT — left as-is)\n"] + extra_lines + [""]
+
+          if policy_lines:
+              lines += ["### Policy-excluded versions present in consumer (informational)\n"] + policy_lines + [""]
+
+          if not clean:
+              lines += ["---",
+                        f"*{len(missing_entries)} missing, {len(extra_entries)} extra, "
+                        f"{len(url_issues)} URL issue(s)*"]
+
+          report = "\n".join(lines) + "\n"
+          with open("/tmp/drift-report.md", "w") as f:
+              f.write(report)
+          print(report)
+
+          # ── Generate fixed YAML ─────────────────────────────────────────
+          if actionable:
+              fixed = consumer_text
+
+              # Fix SSH URLs in-place (any org, not just pgEdge)
+              fixed = re.sub(r'git@github\.com:([^/]+)/', r'https://github.com/\1/', fixed)
+
+              # Insert missing entries adjacent to existing entries for the same URL,
+              # falling back to end of sources: block when no existing entry found.
+              if missing_entries:
+                  # Group blocks by normalized URL so all versions of a component
+                  # are inserted together next to the existing entries for that URL.
+                  url_groups = {}
+                  for k, e in missing_entries.items():
+                      raw_url = clean_url(e.get("kb_git_source") or e.get("upstream_git_source", ""))
+                      norm    = normalize_url(raw_url)
+                      ref     = e.get("kb_tag") or e.get("kb_branch") or \
+                                e.get("upstream_tag") or e.get("upstream_branch", "")
+                      doc     = e.get("kb_doc_path") or e.get("upstream_doc_path", "")
+                      ref_key = "tag" if (e.get("kb_tag") or e.get("upstream_tag")) and \
+                                         not (e.get("kb_branch") or e.get("upstream_branch")) \
+                                else "branch"
+                      block = (
+                          f"\n    - git_url: \"{raw_url}\""
+                          f"\n      {ref_key}: \"{ref}\""
+                          f"\n      doc_path: \"{doc}\""
+                          f"\n      project_name: \"{e.get('name','')}\""
+                      )
+                      if e.get("version", ""):
+                          block += f"\n      project_version: \"{e.get('version')}\""
+                      if norm not in url_groups:
+                          url_groups[norm] = {"comment": f"\n    # {e.get('name','')} — added by auto/sync-kb-builder",
+                                              "blocks": [], "raw_url": raw_url}
+                      url_groups[norm]["blocks"].append(block)
+
+                  def sources_bounds(text):
+                      """Return (after_sources, sources_end) positions."""
+                      sm = re.search(r'(?m)^sources:\s*(?:#.*)?$', text)
+                      if not sm:
+                          return None, None
+                      # Match any top-level key (with or without an inline value)
+                      ns = re.search(r'(?m)^(?!\s|#)[^:\n]+:', text[sm.end():])
+                      return sm.end(), sm.end() + ns.start() if ns else len(text)
+
+                  for norm_url, grp in url_groups.items():
+                      after_sources, sources_end = sources_bounds(fixed)
+                      if after_sources is None:
+                          fixed = fixed.rstrip() + "\n" + grp["comment"] + "".join(grp["blocks"]) + "\n"
+                          continue
+                      sources_text = fixed[after_sources:sources_end]
+                      matches = [
+                          m for m in re.finditer(
+                              r'(?m)^    - git_url:\s*"([^"]+)"\s*$',
+                              sources_text
+                          )
+                          if normalize_url(m.group(1)) == norm_url
+                      ]
+                      if matches:
+                          for new_block in grp["blocks"]:
+                              after_sources, sources_end = sources_bounds(fixed)
+                              sources_text = fixed[after_sources:sources_end]
+                              cur_matches = [
+                                  m for m in re.finditer(
+                                      r'(?m)^    - git_url:\s*"([^"]+)"\s*$',
+                                      sources_text
+                                  )
+                                  if normalize_url(m.group(1)) == norm_url
+                              ]
+                              ver_match = re.search(r'project_version:\s*"([^"]+)"', new_block)
+                              new_ver = version_key(ver_match.group(1) if ver_match else "")
+                              insert_before = None
+                              for m in cur_matches:
+                                  nxt_m = re.search(r'\n    - ', sources_text[m.end():])
+                                  block_end = m.end() + nxt_m.start() if nxt_m else len(sources_text)
+                                  ver_m = (re.search(r'project_version:\s*"([^"]+)"',
+                                                     sources_text[m.start():block_end]) or
+                                           re.search(r'(?:tag|branch):\s*"([^"]*)"',
+                                                     sources_text[m.start():block_end]))
+                                  if new_ver > version_key(ver_m.group(1) if ver_m else ""):
+                                      insert_before = m.start()
+                                      break
+                              if insert_before is not None:
+                                  fixed = (fixed[:after_sources + insert_before]
+                                           + new_block.lstrip("\n") + "\n\n"
+                                           + fixed[after_sources + insert_before:])
+                              elif not cur_matches:
+                                  fixed = fixed[:sources_end] + "\n" + new_block + "\n" + fixed[sources_end:]
+                              else:
+                                  last = cur_matches[-1]
+                                  nxt = re.search(r'\n    - ', sources_text[last.end():])
+                                  if nxt:
+                                      ins = after_sources + last.end() + nxt.start()
+                                      fixed = fixed[:ins] + "\n" + new_block + fixed[ins:]
+                                  else:
+                                      fixed = fixed[:sources_end] + "\n" + new_block + "\n" + fixed[sources_end:]
+                      else:
+                          group_text = grp["comment"] + "".join(grp["blocks"])
+                          fixed = fixed[:sources_end] + "\n" + group_text + "\n" + fixed[sources_end:]
+
+              with open(CONSUMER_FILE, "w") as f:
+                  f.write(fixed)
+
+          # ── Write outputs ───────────────────────────────────────────────
+          env_file = os.environ.get("GITHUB_OUTPUT", "/tmp/github_output")
+          with open(env_file, "a") as f:
+              f.write(f"actionable={'true' if actionable else 'false'}\n")
+          PYEOF
+
+      - name: Push fix branch
+        if: steps.drift.outputs.actionable == 'true'
+        id: push
+        env:
+          GH_TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+        run: |
+          FIX_BRANCH="auto/sync-kb-builder"
+          BASE_BRANCH="${{ github.event.repository.default_branch || 'main' }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+          cp examples/pgedge-ai-kb-builder.yaml /tmp/kb_builder_generated.yaml
+          git stash
+          git fetch origin "$BASE_BRANCH"
+          git fetch origin "$FIX_BRANCH" 2>/dev/null || true
+
+          if git rev-parse --verify "origin/$FIX_BRANCH" &>/dev/null; then
+            EXISTING=$(git show "origin/$FIX_BRANCH:examples/pgedge-ai-kb-builder.yaml" 2>/dev/null || echo "")
+            GENERATED=$(cat /tmp/kb_builder_generated.yaml)
+            if [ "$EXISTING" = "$GENERATED" ]; then
+              echo "Fix branch already contains identical changes — skipping push to preserve PR approvals."
+              echo "pushed=false" >> "$GITHUB_OUTPUT"
+              echo "branch_ready=true" >> "$GITHUB_OUTPUT"
+              echo "fix_branch=$FIX_BRANCH" >> "$GITHUB_OUTPUT"
+              echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          git checkout -B "$FIX_BRANCH" "origin/$BASE_BRANCH"
+          git stash pop
+
+          git add examples/pgedge-ai-kb-builder.yaml
+          if git diff --cached --quiet; then
+            echo "No file changes after applying fixes — drift already resolved, skipping PR."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "sync: fix kb-builder drift against SSOT sources.yaml"
+          git push --force-with-lease origin "$FIX_BRANCH"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "fix_branch=$FIX_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update fix PR
+        if: steps.push.outputs.pushed == 'true' || steps.push.outputs.branch_ready == 'true'
+        uses: actions/github-script@v7
+        env:
+          FIX_BRANCH: ${{ steps.push.outputs.fix_branch }}
+          BASE_BRANCH: ${{ steps.push.outputs.base_branch }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+        with:
+          github-token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/drift-report.md', 'utf8');
+            const fixBranch = process.env.FIX_BRANCH;
+            const baseBranch = process.env.BASE_BRANCH;
+            const pushed = process.env.PUSHED === 'true';
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+
+            const { data: prs } = await github.rest.pulls.list({
+              owner, repo,
+              head: `${owner}:${fixBranch}`,
+              state: 'open',
+            });
+
+            if (prs.length > 0) {
+              if (pushed) {
+                const prNumber = prs[0].number;
+                console.log(`Updating PR #${prNumber} body`);
+                await github.rest.pulls.update({
+                  owner, repo,
+                  pull_number: prNumber,
+                  body,
+                });
+              } else {
+                console.log(`PR already open and branch unchanged — no update needed`);
+              }
+            } else {
+              console.log('Creating new fix PR');
+              await github.rest.pulls.create({
+                owner, repo,
+                title: 'sync: fix kb-builder drift against SSOT',
+                head: fixBranch,
+                base: baseBranch,
+                body,
+              });
+            }
