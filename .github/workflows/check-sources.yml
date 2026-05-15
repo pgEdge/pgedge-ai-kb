@@ -19,7 +19,7 @@ jobs:
   check-sources:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
@@ -331,7 +331,7 @@ jobs:
 
       - name: Create or update fix PR
         if: steps.push.outputs.pushed == 'true' || steps.push.outputs.branch_ready == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:
           FIX_BRANCH: ${{ steps.push.outputs.fix_branch }}
           BASE_BRANCH: ${{ steps.push.outputs.base_branch }}

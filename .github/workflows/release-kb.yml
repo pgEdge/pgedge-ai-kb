@@ -20,7 +20,7 @@ jobs:
         runs-on: [ollama, self-hosted]
         steps:
             - name: Checkout code
-              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
               with:
                   ref: ${{ github.event.inputs.branch }}
                   fetch-depth: 0
@@ -38,7 +38,7 @@ jobs:
                   fi
 
             - name: Set up Go
-              uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+              uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
               with:
                   go-version: '1.25'
                   cache: true
@@ -124,7 +124,7 @@ jobs:
                   rm -f "$RUNNER_TEMP/gitconfig"
 
             - name: Create GitHub Release
-              uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+              uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
               with:
                   tag_name: ${{ github.event.inputs.release_tag }}
                   name: Knowledge Base ${{ github.event.inputs.release_tag }}
