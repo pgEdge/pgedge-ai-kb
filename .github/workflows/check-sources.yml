@@ -194,9 +194,16 @@ jobs:
                       ref     = e.get("kb_tag") or e.get("kb_branch") or \
                                 e.get("upstream_tag") or e.get("upstream_branch", "")
                       doc     = e.get("kb_doc_path") or e.get("upstream_doc_path", "")
-                      ref_key = "tag" if (e.get("kb_tag") or e.get("upstream_tag")) and \
-                                         not (e.get("kb_branch") or e.get("upstream_branch")) \
-                                else "branch"
+                      # ref_key must follow the same precedence chain as ref above,
+                      # so kb_* overrides on the consumer side win over upstream_*.
+                      if e.get("kb_tag"):
+                          ref_key = "tag"
+                      elif e.get("kb_branch"):
+                          ref_key = "branch"
+                      elif e.get("upstream_tag"):
+                          ref_key = "tag"
+                      else:
+                          ref_key = "branch"
                       block = (
                           f"\n    - git_url: \"{raw_url}\""
                           f"\n      {ref_key}: \"{ref}\""
