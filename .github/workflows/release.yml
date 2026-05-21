@@ -5,6 +5,11 @@ on:
         tags:
             - 'v*'
     workflow_dispatch:
+        inputs:
+            simulate_tag:
+                description: 'Simulate a tag push for end-to-end branch testing (e.g. v0.0.1-test1). Blank = binary snapshot only. Backup-to-S3 and repo-push stay disabled — only real v* tag pushes reach S3.'
+                required: false
+                default: ''
 
 permissions:
     contents: write
@@ -146,21 +151,41 @@ jobs:
     determine-repo-type:
         name: Determine repo routing
         runs-on: ubuntu-latest
-        if: github.ref_type == 'tag'
+        # Runs when a real v* tag is pushed, or when workflow_dispatch was
+        # invoked with simulate_tag set. The latter enables branch-side
+        # end-to-end packaging tests without touching S3 / live repos.
+        if: github.ref_type == 'tag' || github.event.inputs.simulate_tag != ''
         outputs:
             repo-type: ${{ steps.ctx.outputs.repo-type }}
             component-version: ${{ steps.ctx.outputs.component-version }}
             component-buildnum: ${{ steps.ctx.outputs.component-buildnum }}
             kb-db-release-tag: ${{ steps.ctx.outputs.kb-db-release-tag }}
+            effective-tag: ${{ steps.ctx.outputs.effective-tag }}
+            simulated: ${{ steps.ctx.outputs.simulated }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
             - name: Parse tag and source pkg/common.sh
               id: ctx
+              env:
+                  SIMULATE_TAG: ${{ github.event.inputs.simulate_tag }}
               run: |
                   set -euo pipefail
-                  case "${GITHUB_REF_NAME}" in
+
+                  # Pick the effective tag: simulate_tag input wins if non-empty,
+                  # otherwise the real pushed tag. The if-guard above ensures
+                  # at least one is set when we get here.
+                  if [ -n "${SIMULATE_TAG}" ]; then
+                      effective_tag="${SIMULATE_TAG}"
+                      simulated=true
+                      echo "::notice::Simulated tag mode — using ${effective_tag}"
+                  else
+                      effective_tag="${GITHUB_REF_NAME}"
+                      simulated=false
+                  fi
+
+                  case "${effective_tag}" in
                       v*-test*|v*-dev*)
                           repo_type=daily
                           ;;
@@ -168,12 +193,12 @@ jobs:
                           repo_type=staging
                           ;;
                       *)
-                          echo "::error::Unsupported tag pattern: ${GITHUB_REF_NAME}"
+                          echo "::error::Unsupported tag pattern: ${effective_tag}"
                           exit 1
                           ;;
                   esac
 
-                  ref="${GITHUB_REF_NAME#v}"
+                  ref="${effective_tag#v}"
                   if [[ "${ref}" == *-* ]]; then
                       cv="${ref%%-*}"
                       cbn="0.${ref#*-}"
@@ -193,8 +218,11 @@ jobs:
                   echo "component-version=${cv}"                >> "$GITHUB_OUTPUT"
                   echo "component-buildnum=${cbn}"              >> "$GITHUB_OUTPUT"
                   echo "kb-db-release-tag=${KB_DB_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+                  echo "effective-tag=${effective_tag}"         >> "$GITHUB_OUTPUT"
+                  echo "simulated=${simulated}"                 >> "$GITHUB_OUTPUT"
 
-                  echo "Tag:                ${GITHUB_REF_NAME}"
+                  echo "Tag:                ${effective_tag}"
+                  echo "Simulated:          ${simulated}"
                   echo "Repo type:          ${repo_type}"
                   echo "Component version:  ${cv}"
                   echo "Component buildnum: ${cbn}"
@@ -377,6 +405,9 @@ jobs:
                   pgedge_builder_token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
 
             - name: Back up RPMs to S3
+              # Skipped on simulate_tag (branch test) — AWS creds aren't
+              # required for branch verification, only for real tag pushes.
+              if: github.ref_type == 'tag'
               uses: ./.github/actions/pgedge-backup-artifacts
               with:
                   s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
@@ -395,12 +426,17 @@ jobs:
                   ARCH: ${{ matrix.arch }}
                   TIMESTAMP: ${{ steps.vars.outputs.timestamp }}
                   S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  EFFECTIVE_TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  SIMULATED: ${{ needs.determine-repo-type.outputs.simulated }}
               run: |
                   set -euo pipefail
                   cell="rpm__el-${OS_VERSION}__${ARCH}"
                   mkdir -p manifest
                   out_dir="output/el${OS_VERSION}-${ARCH}"
                   files_json=$(ls "${out_dir}"/*.rpm 2>/dev/null | xargs -n1 basename 2>/dev/null | jq -R . | jq -s . || echo '[]')
+                  # backup_path is a record of where the artifacts *would* land
+                  # on a real tag push. On simulate_tag runs the backup step
+                  # didn't execute, so this is for reference only.
                   cat > "manifest/${cell}.json" <<EOF
                   {
                       "cell": "${cell}",
@@ -416,7 +452,8 @@ jobs:
                       "run_id": "${GITHUB_RUN_ID}",
                       "run_attempt": "${GITHUB_RUN_ATTEMPT}",
                       "commit_sha": "${GITHUB_SHA}",
-                      "tag": "${GITHUB_REF_NAME}",
+                      "tag": "${EFFECTIVE_TAG}",
+                      "simulated": ${SIMULATED},
                       "backup_path": "s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${COMPONENT_VERSION}/${TIMESTAMP}/dnf/${OS_VERSION}/",
                       "files": ${files_json}
                   }
@@ -439,6 +476,8 @@ jobs:
 
     push-dnf:
         name: Push DNF (EL ${{ matrix.os-version }})
+        # Strictly tag-only — branch tests (simulate_tag) never push to live repos.
+        if: github.ref_type == 'tag'
         needs: [determine-repo-type, package-rpm]
         runs-on: ubuntu-latest
         strategy:
@@ -586,6 +625,8 @@ jobs:
                   pgedge_builder_token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
 
             - name: Back up DEBs to S3
+              # Skipped on simulate_tag (branch test) — see package-rpm.
+              if: github.ref_type == 'tag'
               uses: ./.github/actions/pgedge-backup-artifacts
               with:
                   s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
@@ -604,6 +645,8 @@ jobs:
                   ARCH: ${{ matrix.arch }}
                   TIMESTAMP: ${{ steps.vars.outputs.timestamp }}
                   S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  EFFECTIVE_TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  SIMULATED: ${{ needs.determine-repo-type.outputs.simulated }}
               run: |
                   set -euo pipefail
                   cell="deb__${DISTRO}__${ARCH}"
@@ -625,7 +668,8 @@ jobs:
                       "run_id": "${GITHUB_RUN_ID}",
                       "run_attempt": "${GITHUB_RUN_ATTEMPT}",
                       "commit_sha": "${GITHUB_SHA}",
-                      "tag": "${GITHUB_REF_NAME}",
+                      "tag": "${EFFECTIVE_TAG}",
+                      "simulated": ${SIMULATED},
                       "backup_path": "s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${COMPONENT_VERSION}/${TIMESTAMP}/apt/${DISTRO}/",
                       "files": ${files_json}
                   }
@@ -648,6 +692,8 @@ jobs:
 
     push-apt:
         name: Push APT (${{ matrix.distro }})
+        # Strictly tag-only — branch tests (simulate_tag) never push to live repos.
+        if: github.ref_type == 'tag'
         needs: [determine-repo-type, package-deb]
         runs-on: ubuntu-latest
         strategy:
@@ -732,6 +778,8 @@ jobs:
                   CV: ${{ needs.determine-repo-type.outputs.component-version }}
                   CBN: ${{ needs.determine-repo-type.outputs.component-buildnum }}
                   KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+                  EFFECTIVE_TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  SIMULATED: ${{ needs.determine-repo-type.outputs.simulated }}
               run: |
                   set -euo pipefail
                   mkdir -p aggregated
@@ -739,7 +787,8 @@ jobs:
                       run_id:              "'"${GITHUB_RUN_ID}"'",
                       run_attempt:         "'"${GITHUB_RUN_ATTEMPT}"'",
                       repo:                "'"${GITHUB_REPOSITORY}"'",
-                      tag:                 "'"${GITHUB_REF_NAME}"'",
+                      tag:                 "'"${EFFECTIVE_TAG}"'",
+                      simulated:           '"${SIMULATED}"',
                       commit_sha:          "'"${GITHUB_SHA}"'",
                       component_name:      "pgedge-ai-kb",
                       component_version:   "'"${CV}"'",
@@ -764,6 +813,9 @@ jobs:
                   } >> "$GITHUB_STEP_SUMMARY"
 
             - name: Upload aggregated manifest to S3
+              # Skipped on simulate_tag — the aggregated JSON still lands in
+              # the workflow artifact below so the branch test can inspect it.
+              if: github.ref_type == 'tag'
               env:
                   AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
                   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
