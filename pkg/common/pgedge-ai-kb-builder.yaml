@@ -1,0 +1,456 @@
+# pgEdge AI Knowledgebase Builder Configuration Example
+
+# Output database path (optional, defaults to pgedge-ai-kb.db in same directory as config)
+database_path: "bin/pgedge-ai-kb.db"
+
+# Directory for storing downloaded/processed documentation (optional, defaults to doc-source)
+doc_source_path: "bin/doc-source"
+
+# Documentation sources
+sources:
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_18_3"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "18"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_18_4"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "18"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_17_9"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "17"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_17_10"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "17"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_16_13"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "16"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_16_14"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "16"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_15_17"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "15"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_15_18"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "15"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_14_22"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "14"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_14_23"
+      doc_path: "doc/src/sgml"
+      project_name: "PostgreSQL"
+      project_version: "14"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgadmin913"
+      doc_path: "docs"
+      project_name: "pgAdmin 4"
+      project_version: "9.13"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgadmin912"
+      doc_path: "docs"
+      project_name: "pgAdmin 4"
+      project_version: "9.12"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgadmin911"
+      doc_path: "docs"
+      project_name: "pgAdmin 4"
+      project_version: "9.11"
+
+    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
+      tag: "v1.0.0-beta1"
+      doc_path: "docs"
+      project_name: "pgEdge AI DBA Workbench"
+      project_version: "1.0.0-beta1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "patroni413"
+      doc_path: "docs"
+      project_name: "patroni"
+      project_version: "4.1.3"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "patroni412"
+      doc_path: "docs"
+      project_name: "patroni"
+      project_version: "4.1.2"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "patroni411"
+      doc_path: "docs"
+      project_name: "patroni"
+      project_version: "4.1.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "vchordbm25030"
+      doc_path: "docs"
+      project_name: "VectorChord-bm25"
+      project_version: "0.3.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pldebugger19"
+      doc_path: "docs"
+      project_name: "pldebugger"
+      project_version: "1.9"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgcron167"
+      doc_path: "docs"
+      project_name: "pg_cron"
+      project_version: "1.6.7"
+
+    - git_url: "https://github.com/pgEdge/pgedge-docs.git"
+      branch: "main"
+      doc_path: "docs/cloud"
+      project_name: "pgEdge Cloud"
+      project_version: ""
+
+    - git_url: "https://github.com/pgEdge/pgedge-docs.git"
+      branch: "main"
+      doc_path: "docs/platform"
+      project_name: "pgEdge Platform"
+
+    - git_url: "https://github.com/pgEdge/pgedge-docs.git"
+      branch: "main"
+      doc_path: "docs/enterprise"
+      project_name: "pgEdge Enterprise"
+
+    - git_url: "https://github.com/pgEdge/pgedge-postgres-mcp.git"
+      tag: "v1.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge Postgres MCP"
+      project_version: "1.0.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-ai-kb.git"
+      branch: "main"
+      doc_path: "docs"
+      project_name: "pgEdge AI Knowledgebase Builder"
+
+    - git_url: "https://github.com/pgEdge/pgedge-anonymizer.git"
+      tag: "v1.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge Anonymizer"
+      project_version: "1.0.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-docloader.git"
+      tag: "v1.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge Docloader"
+      project_version: "1.0.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-rag-server.git"
+      tag: "v1.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge RAG Server"
+      project_version: "1.0.0"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.8"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.8"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.7"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.7"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.6"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.6"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.5"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.5"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.4"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.4"
+
+    - git_url: "https://github.com/pgEdge/control-plane.git"
+      tag: "v0.7.0"
+      doc_path: "docs"
+      project_name: "pgEdge Control Plane"
+      project_version: "0.7.0"
+
+    - git_url: "https://github.com/pgEdge/control-plane.git"
+      tag: "v0.6.2"
+      doc_path: "docs"
+      project_name: "pgEdge Control Plane"
+      project_version: "0.6.2"
+
+    - git_url: "https://github.com/pgEdge/control-plane.git"
+      tag: "v0.6.1"
+      doc_path: "docs"
+      project_name: "pgEdge Control Plane"
+      project_version: "0.6.1"
+
+    - git_url: "https://github.com/pgEdge/snowflake.git"
+      tag: "v2.4"
+      doc_path: "docs"
+      project_name: "pgEdge Snowflake"
+      project_version: "2.4"
+
+    - git_url: "https://github.com/pgEdge/lolor.git"
+      tag: "v1.2.2"
+      doc_path: "docs"
+      project_name: "pgEdge LOLOR"
+      project_version: "1.2.2"
+
+    - git_url: "https://github.com/pgEdge/pgedge-helm.git"
+      tag: "v0.1.0"
+      doc_path: "docs"
+      project_name: "pgEdge Helm"
+      project_version: "0.1.0"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v2.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "2.0.0"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v1.9.0"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "1.9.0"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v1.8.1"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "1.8.1"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v1.8.0"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "1.8.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-vectorizer.git"
+      tag: "v1.0"
+      doc_path: "docs"
+      project_name: "pgEdge Vectorizer"
+      project_version: "1.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbouncer125"
+      doc_path: "docs"
+      project_name: "PgBouncer"
+      project_version: "1.25.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbouncer124"
+      doc_path: "docs"
+      project_name: "PgBouncer"
+      project_version: "1.24.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbackrest258"
+      doc_path: "docs"
+      project_name: "pgBackRest"
+      project_version: "2.58.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbackrest257"
+      doc_path: "docs"
+      project_name: "pgBackRest"
+      project_version: "2.57.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgis362"
+      doc_path: "docs"
+      project_name: "PostGIS"
+      project_version: "3.6.2"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgis355"
+      doc_path: "docs"
+      project_name: "PostGIS"
+      project_version: "3.5.5"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "cnpg129"
+      doc_path: "docs"
+      project_name: "CloudNativePG"
+      project_version: "1.29"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "cnpg128"
+      doc_path: "docs"
+      project_name: "CloudNativePG"
+      project_version: "1.28"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgvector081"
+      doc_path: "docs"
+      project_name: "pgvector"
+      project_version: "0.8.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgvector080"
+      doc_path: "docs"
+      project_name: "pgvector"
+      project_version: "0.8.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgmq1110"
+      doc_path: "docs"
+      project_name: "pgmq"
+      project_version: "1.11.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgtokenizer011"
+      doc_path: "docs"
+      project_name: "pg_tokenizer"
+      project_version: "0.1.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgvectorize0260"
+      doc_path: "docs"
+      project_name: "pg_vectorize"
+      project_version: "0.26.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit180"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "18.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit171"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "17.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit161"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "16.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgstatmonitor231"
+      doc_path: "docs"
+      project_name: "pg_stat_monitor"
+      project_version: "2.3.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "psycopg2910"
+      doc_path: "docs"
+      project_name: "psycopg2"
+      project_version: "2.9.10"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "systemstats321"
+      doc_path: "docs"
+      project_name: "pgEdge System Stats"
+      project_version: "3.2.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgrest145"
+      doc_path: "docs"
+      project_name: "PostgREST"
+      project_version: "14.5"
+
+    - git_url: "https://github.com/pgEdge/radar.git"
+      tag: "v0.4.1"
+      doc_path: "docs"
+      project_name: "pgEdge Radar"
+      project_version: "0.4.1"
+
+    - git_url: "https://github.com/pgEdge/radar.git"
+      tag: "v0.4.0"
+      doc_path: "docs"
+      project_name: "pgEdge Radar"
+      project_version: "0.4.0"
+
+
+    - git_url: "https://github.com/pgEdge/radar.git"
+      tag: "v0.3.0"
+      doc_path: "docs"
+      project_name: "pgEdge Radar"
+      project_version: "0.3.0"
+    - git_url: "https://github.com/pgEdge/pgedge-loadgen.git"
+      tag: "v1.0.0-beta1"
+      doc_path: "docs"
+      project_name: "pgEdge Load Generator"
+      project_version: "1.0.0-beta1"
+
+    - git_url: "https://github.com/pgEdge/pg_semantic_cache.git"
+      tag: "v0.1.0-beta4"
+      doc_path: "docs"
+      project_name: "pg_semantic_cache"
+      project_version: "0.1.0-beta4"
+
+    # Example: Local documentation
+    # - local_path: "~/projects/my-docs"
+    #   doc_path: "docs"  # Optional subdirectory within local_path
+    #   project_name: "My Project"
+    #   project_version: "1.0"  # Optional - can be omitted for unversioned docs
+
+# Embedding provider configurations
+embeddings:
+    # OpenAI embeddings
+    openai:
+        enabled: true
+        api_key_file: "~/.openai-api-key"  # Defaults to ~/.openai-api-key
+        model: "text-embedding-3-small"     # Defaults to text-embedding-3-small
+        dimensions: 1536                     # Model-specific, defaults to 1536
+
+    # Voyage AI embeddings
+    voyage:
+        enabled: true
+        api_key_file: "~/.voyage-api-key"   # Defaults to ~/.voyage-api-key
+        model: "voyage-3"                    # Defaults to voyage-3
+
+    # Ollama local embeddings
+    ollama:
+        enabled: true
+        endpoint: "http://localhost:11434"  # Defaults to http://localhost:11434
+        model: "nomic-embed-text"            # Defaults to nomic-embed-text
+        # api_key_file: "~/.ollama-api-key"  # Optional: only needed for Ollama Cloud
+
+# Notes:
+# - At least one embedding provider must be enabled
+# - Consumers (such as the pgEdge Postgres MCP Server and the pgEdge AI DBA
+#   Workbench) will use embeddings from one of the configured provider(s)
+# - For Git sources, you can specify either 'branch' or 'tag', not both
+# - Supported document formats: Markdown (.md), HTML (.html, .htm),
+#   reStructuredText (.rst), SGML (.sgml, .sgm), DocBook XML (.xml)

@@ -1,0 +1,54 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_builddeb:
+	dh_builddeb -- -Zgzip
+
+override_dh_auto_install:
+	# --- SBOM generation and signing ---
+	mkdir -p debian/tmp/sbom
+	syft dir:$(CURDIR)/builder -o cyclonedx-json \
+		> debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json || exit 1
+	syft file:$(CURDIR)/kb.db -o cyclonedx-json \
+		> debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json || exit 1
+	KEY_ID=$$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $$5}' | head -n 1); export KEY_ID; \
+	gpg --armor --detach-sign --default-key "$$KEY_ID" \
+		--output debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json.asc \
+		debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json || exit 1; \
+	gpg --armor --detach-sign --default-key "$$KEY_ID" \
+		--output debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json.asc \
+		debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json || exit 1
+
+	# --- Binary (renamed at install time to /usr/bin/kb-builder) ---
+	install -D -m 755 builder/pgedge-ai-kb-builder \
+		debian/pgedge-postgres-mcp-kb/usr/bin/kb-builder
+
+	# --- Knowledge base database ---
+	install -D -m 644 kb.db \
+		debian/pgedge-postgres-mcp-kb/usr/share/pgedge/postgres-mcp-kb/kb.db
+
+	# --- Example config ---
+	install -D -m 644 debian/pgedge-ai-kb-builder.yaml \
+		debian/pgedge-postgres-mcp-kb/etc/pgedge/pgedge-ai-kb-builder.yaml
+
+	# --- Documentation ---
+	install -D -m 644 builder/LICENSE.md \
+		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/LICENSE.md
+	install -D -m 644 builder/README.md \
+		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/README.md
+	install -D -m 644 debian/VERSION \
+		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/VERSION
+
+	# --- SBOMs ---
+	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json \
+		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-sbom.json
+	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json.asc \
+		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-sbom.json.asc
+	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json \
+		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-db-sbom.json
+	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json.asc \
+		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-db-sbom.json.asc
+
+	rm -rf debian/tmp/sbom

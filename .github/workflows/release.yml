@@ -10,8 +10,15 @@ permissions:
     contents: write
     packages: write
 
+concurrency:
+    group: release-${{ github.ref_name }}
+    cancel-in-progress: false
+
 jobs:
-    # Build for x86_64 architecture
+    # =========================================================================
+    # Binary builds (unchanged from prior version)
+    # =========================================================================
+
     build-amd64:
         name: Build x86_64
         runs-on: ubuntu-latest
@@ -51,7 +58,6 @@ jobs:
                       dist/*.zip
                   retention-days: 1
 
-    # Build for ARM64 architecture
     build-arm64:
         name: Build ARM64
         runs-on: ubuntu-24.04-arm
@@ -91,7 +97,6 @@ jobs:
                       dist/*.zip
                   retention-days: 1
 
-    # Combine artifacts and create release
     release:
         name: Create Release
         runs-on: ubuntu-latest
@@ -115,9 +120,6 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist/
 
-            - name: List all artifacts
-              run: ls -lh dist/
-
             - name: Generate checksums
               run: |
                   cd dist
@@ -137,12 +139,644 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Upload final artifacts
+    # =========================================================================
+    # Packaging pipeline (new) — RPM + DEB build, sign, push, backup, manifest
+    # =========================================================================
+
+    determine-repo-type:
+        name: Determine repo routing
+        runs-on: ubuntu-latest
+        if: github.ref_type == 'tag'
+        outputs:
+            repo-type: ${{ steps.ctx.outputs.repo-type }}
+            component-version: ${{ steps.ctx.outputs.component-version }}
+            component-buildnum: ${{ steps.ctx.outputs.component-buildnum }}
+            kb-db-release-tag: ${{ steps.ctx.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Parse tag and source pkg/common.sh
+              id: ctx
+              run: |
+                  set -euo pipefail
+                  case "${GITHUB_REF_NAME}" in
+                      v*-test*|v*-dev*)
+                          repo_type=daily
+                          ;;
+                      v*-rc*|v*-beta*|v*-alpha*|v*)
+                          repo_type=staging
+                          ;;
+                      *)
+                          echo "::error::Unsupported tag pattern: ${GITHUB_REF_NAME}"
+                          exit 1
+                          ;;
+                  esac
+
+                  ref="${GITHUB_REF_NAME#v}"
+                  if [[ "${ref}" == *-* ]]; then
+                      cv="${ref%%-*}"
+                      cbn="0.${ref#*-}"
+                  else
+                      cv="${ref}"
+                      cbn="1"
+                  fi
+
+                  # Source pkg/common.sh to recover KB_DB_RELEASE_TAG (the
+                  # single source of truth for which kb.db release to bundle).
+                  export COMPONENT_VERSION="${cv}"
+                  export COMPONENT_BUILDNUM="${cbn}"
+                  # shellcheck source=pkg/common.sh
+                  source pkg/common.sh
+
+                  echo "repo-type=${repo_type}"                 >> "$GITHUB_OUTPUT"
+                  echo "component-version=${cv}"                >> "$GITHUB_OUTPUT"
+                  echo "component-buildnum=${cbn}"              >> "$GITHUB_OUTPUT"
+                  echo "kb-db-release-tag=${KB_DB_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+                  echo "Tag:                ${GITHUB_REF_NAME}"
+                  echo "Repo type:          ${repo_type}"
+                  echo "Component version:  ${cv}"
+                  echo "Component buildnum: ${cbn}"
+                  echo "Binary version:     ${BINARY_VERSION}"
+                  echo "KB DB release tag:  ${KB_DB_RELEASE_TAG}"
+                  echo "RPM Version-Rel:    ${PGEDGE_KB_VERSION}-${PGEDGE_KB_RELEASE}"
+                  echo "DEB version:        ${PGEDGE_KB_VERSION_DEB}"
+
+    validate-kb-db:
+        name: Validate kb.db
+        runs-on: ubuntu-latest
+        needs: determine-repo-type
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+        steps:
+            - name: Install sqlite3
+              run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+            - name: Download kb.db from kb release
+              run: |
+                  set -euo pipefail
+                  mkdir -p kb.db.cached
+                  gh release download "${KB_TAG}" \
+                      --repo "${GITHUB_REPOSITORY}" \
+                      --pattern 'kb.db' \
+                      --dir kb.db.cached
+                  ls -lh kb.db.cached/
+
+            - name: Validate schema, row counts, embedding dimensions
+              run: |
+                  set -euo pipefail
+                  db=kb.db.cached/kb.db
+
+                  size=$(stat -c%s "${db}" 2>/dev/null || stat -f%z "${db}")
+                  echo "kb.db size: ${size} bytes"
+                  if [ "${size}" -lt 10485760 ]; then
+                      echo "::error::kb.db smaller than 10 MB (${size} bytes)"
+                      exit 1
+                  fi
+
+                  tables=$(sqlite3 "${db}" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+                  echo "Tables found:"; echo "${tables}" | sed 's/^/  /'
+                  echo "${tables}" | grep -qx chunks       || { echo "::error::missing table chunks";       exit 1; }
+                  echo "${tables}" | grep -qx source_files || { echo "::error::missing table source_files"; exit 1; }
+
+                  chunk_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM chunks;")
+                  echo "chunks count: ${chunk_count}"
+                  if [ "${chunk_count}" -lt 1000 ]; then
+                      echo "::error::chunk count ${chunk_count} below floor 1000"
+                      exit 1
+                  fi
+
+                  src_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM source_files;")
+                  echo "source_files count: ${src_count}"
+                  if [ "${src_count}" -lt 1 ]; then
+                      echo "::error::no source_files recorded"
+                      exit 1
+                  fi
+
+                  # Embedding-dimension consistency: each provider column must
+                  # have a single distinct BLOB length across all rows where
+                  # set. Columns may be NULL for chunks not embedded by that
+                  # provider — those rows are excluded from the check.
+                  for col in openai_embedding voyage_embedding ollama_embedding; do
+                      dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;" || true)
+                      if [ -z "${dims}" ]; then
+                          echo "  ${col}: not populated (skipping)"
+                          continue
+                      fi
+                      n_dims=$(echo "${dims}" | grep -c .)
+                      if [ "${n_dims}" -gt 1 ]; then
+                          echo "::error::inconsistent ${col} dimensions: ${dims}"
+                          exit 1
+                      fi
+                      echo "  ${col}: dimension ${dims}"
+                  done
+
+                  echo "kb.db validation passed"
+
+            - name: Upload validated kb.db
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: release-artifacts-all
-                  path: |
-                      dist/*.tar.gz
-                      dist/*.zip
-                      dist/checksums.txt
+                  name: kb-db-validated
+                  path: kb.db.cached/kb.db
+                  retention-days: 7
+
+    # -------------------------------------------------------------------------
+    # RPM packaging
+    # -------------------------------------------------------------------------
+
+    package-rpm:
+        name: Package RPM (${{ matrix.image }} ${{ matrix.arch }})
+        needs: [determine-repo-type, validate-kb-db, build-amd64, build-arm64]
+        runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+        strategy:
+            fail-fast: false
+            matrix:
+                image: ['almalinux:9', 'almalinux:10']
+                arch: [amd64, arm64]
+        env:
+            REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+            COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
+            KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Compute per-cell vars
+              id: vars
+              run: |
+                  set -euo pipefail
+                  case "${{ matrix.image }}" in
+                      *:9)  os_version=9  ;;
+                      *:10) os_version=10 ;;
+                      *)    echo "::error::Unexpected image ${{ matrix.image }}"; exit 1 ;;
+                  esac
+                  case "${{ matrix.arch }}" in
+                      amd64) tarball_arch=x86_64 ;;
+                      arm64) tarball_arch=arm64  ;;
+                  esac
+                  echo "os-version=${os_version}"     >> "$GITHUB_OUTPUT"
+                  echo "tarball-arch=${tarball_arch}" >> "$GITHUB_OUTPUT"
+                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Download validated kb.db
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: pkg/kb.db.cached/
+
+            - name: Download binary tarball for this arch
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: release-artifacts-${{ matrix.arch }}
+                  path: pkg/binary.cached/
+
+            - name: Filter binary cache to current-tag linux tarball
+              env:
+                  TARBALL_ARCH: ${{ steps.vars.outputs.tarball-arch }}
+              run: |
+                  set -euo pipefail
+                  # shellcheck source=pkg/common.sh
+                  source pkg/common.sh
+                  expected="pgedge-ai-kb-builder_${BINARY_VERSION}_linux_${TARBALL_ARCH}.tar.gz"
+                  if [ ! -f "pkg/binary.cached/${expected}" ]; then
+                      echo "::error::Expected ${expected} not found in pkg/binary.cached/"
+                      ls -la pkg/binary.cached/
+                      exit 1
+                  fi
+                  # Drop everything other than the linux tarball for this arch.
+                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${expected}" -delete
+                  echo "Staged binary tarball:"
+                  ls -la pkg/binary.cached/
+
+            - name: Checkout pgEdge action repos
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  for repo in pgedge-builder-action pgedge-backup-artifacts pgedge-dnf-repo-builder; do
+                      git clone --depth 1 \
+                          "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
+                          ".github/actions/${repo}"
+                  done
+
+            - name: Build RPM
+              uses: ./.github/actions/pgedge-builder-action
+              with:
+                  image: ${{ matrix.image }}
+                  arch: ${{ matrix.arch }}
+                  component_name: pkg
+                  component_version: ${{ env.COMPONENT_VERSION }}
+                  component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
+                  repo_type: ${{ env.REPO_TYPE }}
+                  gpg_private_key: ${{ secrets.GPG_FIPS_RPM_PRIVATE_KEY }}
+                  gpg_public_key: ${{ secrets.GPG_FIPS_RPM_PUBLIC_KEY }}
+                  pgedge_builder_token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+
+            - name: Back up RPMs to S3
+              uses: ./.github/actions/pgedge-backup-artifacts
+              with:
+                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  repo-type: ${{ env.REPO_TYPE }}
+                  os-version: ${{ steps.vars.outputs.os-version }}
+                  output-dir: output/el${{ steps.vars.outputs.os-version }}-${{ matrix.arch }}
+                  component-name: pgedge-ai-kb
+                  component-version: ${{ env.COMPONENT_VERSION }}
+                  timestamp: ${{ steps.vars.outputs.timestamp }}
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Write per-cell backup manifest
+              env:
+                  OS_VERSION: ${{ steps.vars.outputs.os-version }}
+                  ARCH: ${{ matrix.arch }}
+                  TIMESTAMP: ${{ steps.vars.outputs.timestamp }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+              run: |
+                  set -euo pipefail
+                  cell="rpm__el-${OS_VERSION}__${ARCH}"
+                  mkdir -p manifest
+                  out_dir="output/el${OS_VERSION}-${ARCH}"
+                  files_json=$(ls "${out_dir}"/*.rpm 2>/dev/null | xargs -n1 basename 2>/dev/null | jq -R . | jq -s . || echo '[]')
+                  cat > "manifest/${cell}.json" <<EOF
+                  {
+                      "cell": "${cell}",
+                      "package_type": "dnf",
+                      "os_version": "${OS_VERSION}",
+                      "arch": "${ARCH}",
+                      "repo_type": "${REPO_TYPE}",
+                      "component_name": "pgedge-ai-kb",
+                      "component_version": "${COMPONENT_VERSION}",
+                      "component_buildnum": "${COMPONENT_BUILDNUM}",
+                      "kb_db_release_tag": "${KB_TAG}",
+                      "timestamp": "${TIMESTAMP}",
+                      "run_id": "${GITHUB_RUN_ID}",
+                      "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+                      "commit_sha": "${GITHUB_SHA}",
+                      "tag": "${GITHUB_REF_NAME}",
+                      "backup_path": "s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${COMPONENT_VERSION}/${TIMESTAMP}/dnf/${OS_VERSION}/",
+                      "files": ${files_json}
+                  }
+                  EOF
+                  cat "manifest/${cell}.json"
+
+            - name: Upload RPM cell artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: rpm__el-${{ steps.vars.outputs.os-version }}__${{ matrix.arch }}
+                  path: output/el${{ steps.vars.outputs.os-version }}-${{ matrix.arch }}/
+                  retention-days: 7
+
+            - name: Upload RPM manifest
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: manifest-rpm__el-${{ steps.vars.outputs.os-version }}__${{ matrix.arch }}
+                  path: manifest/rpm__el-${{ steps.vars.outputs.os-version }}__${{ matrix.arch }}.json
+                  retention-days: 30
+
+    push-dnf:
+        name: Push DNF (EL ${{ matrix.os-version }})
+        needs: [determine-repo-type, package-rpm]
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                os-version: ['9', '10']
+        concurrency:
+            group: dnf-push-${{ needs.determine-repo-type.outputs.repo-type }}-${{ matrix.os-version }}
+            cancel-in-progress: false
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Download all RPMs for this EL major
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  pattern: rpm__el-${{ matrix.os-version }}__*
+                  path: rpms-flat
+                  merge-multiple: true
+
+            - name: Flatten into single rpms/ dir
+              run: |
+                  set -euo pipefail
+                  mkdir -p rpms
+                  # download-artifact with merge-multiple flattens to the path
+                  # root, but inside each artifact the layout is just *.rpm.
+                  find rpms-flat -type f -name '*.rpm' -exec cp -v {} rpms/ \;
+                  echo "RPMs to push:"
+                  ls -lh rpms/
+
+            - name: Checkout pgedge-dnf-repo-builder
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  mkdir -p .github/actions
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-dnf-repo-builder.git" \
+                      .github/actions/pgedge-dnf-repo-builder
+
+            - name: Push to yum repo
+              uses: ./.github/actions/pgedge-dnf-repo-builder
+              with:
+                  s3-bucket: ${{ secrets.S3_BUCKET_NAME }}
+                  cf-distribution: ${{ secrets.CLOUDFRONT_DISTRIBUTION }}
+                  repo-type: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  os-version: ${{ matrix.os-version }}
+                  rpm-dir: rpms
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    # -------------------------------------------------------------------------
+    # DEB packaging
+    # -------------------------------------------------------------------------
+
+    package-deb:
+        name: Package DEB (${{ matrix.image }} ${{ matrix.arch }})
+        needs: [determine-repo-type, validate-kb-db, build-amd64, build-arm64]
+        runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { image: 'ubuntu:jammy',    distro: jammy,    arch: amd64 }
+                    - { image: 'ubuntu:jammy',    distro: jammy,    arch: arm64 }
+                    - { image: 'ubuntu:noble',    distro: noble,    arch: amd64 }
+                    - { image: 'ubuntu:noble',    distro: noble,    arch: arm64 }
+                    - { image: 'debian:bullseye', distro: bullseye, arch: amd64 }
+                    - { image: 'debian:bullseye', distro: bullseye, arch: arm64 }
+                    - { image: 'debian:bookworm', distro: bookworm, arch: amd64 }
+                    - { image: 'debian:bookworm', distro: bookworm, arch: arm64 }
+                    - { image: 'debian:trixie',   distro: trixie,   arch: amd64 }
+                    - { image: 'debian:trixie',   distro: trixie,   arch: arm64 }
+        env:
+            REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+            COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
+            KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Compute per-cell vars
+              id: vars
+              run: |
+                  set -euo pipefail
+                  case "${{ matrix.arch }}" in
+                      amd64) tarball_arch=x86_64 ;;
+                      arm64) tarball_arch=arm64  ;;
+                  esac
+                  echo "tarball-arch=${tarball_arch}"        >> "$GITHUB_OUTPUT"
+                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Download validated kb.db
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: pkg/kb.db.cached/
+
+            - name: Download binary tarball for this arch
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: release-artifacts-${{ matrix.arch }}
+                  path: pkg/binary.cached/
+
+            - name: Filter binary cache to current-tag linux tarball
+              env:
+                  TARBALL_ARCH: ${{ steps.vars.outputs.tarball-arch }}
+              run: |
+                  set -euo pipefail
+                  # shellcheck source=pkg/common.sh
+                  source pkg/common.sh
+                  expected="pgedge-ai-kb-builder_${BINARY_VERSION}_linux_${TARBALL_ARCH}.tar.gz"
+                  if [ ! -f "pkg/binary.cached/${expected}" ]; then
+                      echo "::error::Expected ${expected} not found in pkg/binary.cached/"
+                      ls -la pkg/binary.cached/
+                      exit 1
+                  fi
+                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${expected}" -delete
+                  echo "Staged binary tarball:"
+                  ls -la pkg/binary.cached/
+
+            - name: Checkout pgEdge action repos
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  for repo in pgedge-builder-action pgedge-backup-artifacts pgedge-apt-repo-builder; do
+                      git clone --depth 1 \
+                          "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
+                          ".github/actions/${repo}"
+                  done
+
+            - name: Build DEB
+              uses: ./.github/actions/pgedge-builder-action
+              with:
+                  image: ${{ matrix.image }}
+                  arch: ${{ matrix.arch }}
+                  component_name: pkg
+                  component_version: ${{ env.COMPONENT_VERSION }}
+                  component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
+                  repo_type: ${{ env.REPO_TYPE }}
+                  gpg_private_key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
+                  gpg_public_key: ${{ secrets.GPG_FIPS_DEB_PUBLIC_KEY }}
+                  pgedge_builder_token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+
+            - name: Back up DEBs to S3
+              uses: ./.github/actions/pgedge-backup-artifacts
+              with:
+                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  repo-type: ${{ env.REPO_TYPE }}
+                  os-version: ${{ matrix.distro }}
+                  output-dir: output/${{ matrix.distro }}-${{ matrix.arch }}
+                  component-name: pgedge-ai-kb
+                  component-version: ${{ env.COMPONENT_VERSION }}
+                  timestamp: ${{ steps.vars.outputs.timestamp }}
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Write per-cell backup manifest
+              env:
+                  DISTRO: ${{ matrix.distro }}
+                  ARCH: ${{ matrix.arch }}
+                  TIMESTAMP: ${{ steps.vars.outputs.timestamp }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+              run: |
+                  set -euo pipefail
+                  cell="deb__${DISTRO}__${ARCH}"
+                  mkdir -p manifest
+                  out_dir="output/${DISTRO}-${ARCH}"
+                  files_json=$(ls "${out_dir}"/*.deb 2>/dev/null | xargs -n1 basename 2>/dev/null | jq -R . | jq -s . || echo '[]')
+                  cat > "manifest/${cell}.json" <<EOF
+                  {
+                      "cell": "${cell}",
+                      "package_type": "apt",
+                      "distro": "${DISTRO}",
+                      "arch": "${ARCH}",
+                      "repo_type": "${REPO_TYPE}",
+                      "component_name": "pgedge-ai-kb",
+                      "component_version": "${COMPONENT_VERSION}",
+                      "component_buildnum": "${COMPONENT_BUILDNUM}",
+                      "kb_db_release_tag": "${KB_TAG}",
+                      "timestamp": "${TIMESTAMP}",
+                      "run_id": "${GITHUB_RUN_ID}",
+                      "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+                      "commit_sha": "${GITHUB_SHA}",
+                      "tag": "${GITHUB_REF_NAME}",
+                      "backup_path": "s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${COMPONENT_VERSION}/${TIMESTAMP}/apt/${DISTRO}/",
+                      "files": ${files_json}
+                  }
+                  EOF
+                  cat "manifest/${cell}.json"
+
+            - name: Upload DEB cell artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: deb__${{ matrix.distro }}__${{ matrix.arch }}
+                  path: output/${{ matrix.distro }}-${{ matrix.arch }}/
+                  retention-days: 7
+
+            - name: Upload DEB manifest
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: manifest-deb__${{ matrix.distro }}__${{ matrix.arch }}
+                  path: manifest/deb__${{ matrix.distro }}__${{ matrix.arch }}.json
+                  retention-days: 30
+
+    push-apt:
+        name: Push APT (${{ matrix.distro }})
+        needs: [determine-repo-type, package-deb]
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { distro: jammy,    image: 'ubuntu:jammy' }
+                    - { distro: noble,    image: 'ubuntu:noble' }
+                    - { distro: bullseye, image: 'debian:bullseye' }
+                    - { distro: bookworm, image: 'debian:bookworm' }
+                    - { distro: trixie,   image: 'debian:trixie' }
+        concurrency:
+            group: apt-push-${{ needs.determine-repo-type.outputs.repo-type }}-${{ matrix.distro }}
+            cancel-in-progress: false
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Download all DEBs for this distro
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  pattern: deb__${{ matrix.distro }}__*
+                  path: debs-flat
+                  merge-multiple: true
+
+            - name: Flatten into single debs/ dir
+              run: |
+                  set -euo pipefail
+                  mkdir -p debs
+                  find debs-flat -type f -name '*.deb' -exec cp -v {} debs/ \;
+                  echo "DEBs to push:"
+                  ls -lh debs/
+
+            - name: Checkout pgedge-apt-repo-builder
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  mkdir -p .github/actions
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-apt-repo-builder.git" \
+                      .github/actions/pgedge-apt-repo-builder
+
+            - name: Push to apt repo
+              uses: ./.github/actions/pgedge-apt-repo-builder
+              with:
+                  s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
+                  cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
+                  repo-type: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  os-name: ${{ matrix.image }}
+                  deb-dir: debs
+                  gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    # -------------------------------------------------------------------------
+    # Aggregated manifest for the future promotion tool
+    # -------------------------------------------------------------------------
+
+    publish-manifest:
+        name: Publish aggregated backup manifest
+        needs: [determine-repo-type, push-dnf, push-apt]
+        if: always() && needs.determine-repo-type.result == 'success'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download all per-cell manifests
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  pattern: manifest-*
+                  path: manifests
+                  merge-multiple: true
+
+            - name: Install awscli
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y python3-pip jq
+                  pip3 install --user awscli
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+            - name: Aggregate manifests
+              env:
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  CV: ${{ needs.determine-repo-type.outputs.component-version }}
+                  CBN: ${{ needs.determine-repo-type.outputs.component-buildnum }}
+                  KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p aggregated
+                  jq -s '{
+                      run_id:              "'"${GITHUB_RUN_ID}"'",
+                      run_attempt:         "'"${GITHUB_RUN_ATTEMPT}"'",
+                      repo:                "'"${GITHUB_REPOSITORY}"'",
+                      tag:                 "'"${GITHUB_REF_NAME}"'",
+                      commit_sha:          "'"${GITHUB_SHA}"'",
+                      component_name:      "pgedge-ai-kb",
+                      component_version:   "'"${CV}"'",
+                      component_buildnum:  "'"${CBN}"'",
+                      kb_db_release_tag:   "'"${KB_TAG}"'",
+                      repo_type:           "'"${REPO_TYPE}"'",
+                      push_dnf_outcome:    "'"${{ needs.push-dnf.result }}"'",
+                      push_apt_outcome:    "'"${{ needs.push-apt.result }}"'",
+                      cells:               .
+                  }' manifests/*.json > aggregated/manifest.json
+                  cat aggregated/manifest.json
+
+            - name: Write step summary
+              run: |
+                  {
+                      echo "## Backup manifest"
+                      echo ""
+                      echo "| Cell | Repo | Version | Backup path |"
+                      echo "|---|---|---|---|"
+                      jq -r '.cells[] | "| \(.cell) | \(.repo_type) | \(.component_version)-\(.component_buildnum) | \(.backup_path) |"' \
+                          aggregated/manifest.json
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Upload aggregated manifest to S3
+              env:
+                  AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET:      ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+              run: |
+                  set -euo pipefail
+                  key="_runs/${GITHUB_RUN_ID}-r${GITHUB_RUN_ATTEMPT}.json"
+                  aws s3 cp aggregated/manifest.json "s3://${S3_BACKUP_BUCKET}/${key}"
+                  echo "Aggregated manifest uploaded to s3://${S3_BACKUP_BUCKET}/${key}"
+
+            - name: Upload aggregated manifest as workflow artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: aggregated-manifest
+                  path: aggregated/manifest.json
                   retention-days: 90
