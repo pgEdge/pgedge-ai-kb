@@ -455,6 +455,27 @@ jobs:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
         steps:
+            - name: Free disk space
+              # Each RPM cell artifact is ~2GB (binary + src.rpm + kb.db).
+              # 4 of them, extracted, then copied into rpms-el{9,10}/, easily
+              # exceeds the runner's default ~14GB free space. Strip the
+              # large pre-installed toolchains we don't use (.NET, Android,
+              # Haskell, Java, CodeQL) to free ~25-30GB before download.
+              run: |
+                  set -eu
+                  echo "Before cleanup:"
+                  df -h /
+                  sudo rm -rf \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost \
+                      /usr/local/lib/node_modules
+                  sudo apt-get clean
+                  echo "After cleanup:"
+                  df -h /
+
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -470,18 +491,24 @@ jobs:
               id: organize
               run: |
                   set -euo pipefail
+                  # mv (not cp) so we don't keep two copies of multi-GB RPMs
+                  # on the runner's small disk. The rpm-artifacts/ tree is no
+                  # longer needed after this step.
                   for os_version in 9 10; do
                       mkdir -p "rpms-el${os_version}"
                       shopt -s nullglob
                       for src_dir in rpm-artifacts/rpm__el-${os_version}__*; do
                           [ -d "${src_dir}" ] || continue
-                          find "${src_dir}" -type f -name '*.rpm' -exec cp -v {} "rpms-el${os_version}/" \;
+                          find "${src_dir}" -type f -name '*.rpm' -exec mv -v {} "rpms-el${os_version}/" \;
                       done
                       shopt -u nullglob
                       count=$(find "rpms-el${os_version}" -maxdepth 1 -name '*.rpm' | wc -l)
                       echo "EL${os_version}: ${count} RPMs"
                       echo "el${os_version}_count=${count}" >> "$GITHUB_OUTPUT"
                   done
+                  # Drop the now-empty download dir to reclaim its space.
+                  rm -rf rpm-artifacts
+                  df -h /
                   # Single timestamp shared by all backups in this push job.
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
@@ -681,6 +708,25 @@ jobs:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
         steps:
+            - name: Free disk space
+              # 10 DEB cell artifacts × ~1GB each saturate the runner's
+              # ~14GB default free space. Strip pre-installed toolchains
+              # we don't need.
+              run: |
+                  set -eu
+                  echo "Before cleanup:"
+                  df -h /
+                  sudo rm -rf \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost \
+                      /usr/local/lib/node_modules
+                  sudo apt-get clean
+                  echo "After cleanup:"
+                  df -h /
+
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -695,18 +741,22 @@ jobs:
               id: organize
               run: |
                   set -euo pipefail
+                  # mv (not cp) so we don't keep two copies of multi-GB
+                  # DEBs on the runner's small disk.
                   for distro in jammy noble bullseye bookworm trixie; do
                       mkdir -p "debs-${distro}"
                       shopt -s nullglob
                       for src_dir in deb-artifacts/deb__${distro}__*; do
                           [ -d "${src_dir}" ] || continue
-                          find "${src_dir}" -type f -name '*.deb' -exec cp -v {} "debs-${distro}/" \;
+                          find "${src_dir}" -type f -name '*.deb' -exec mv -v {} "debs-${distro}/" \;
                       done
                       shopt -u nullglob
                       count=$(find "debs-${distro}" -maxdepth 1 -name '*.deb' | wc -l)
                       echo "${distro}: ${count} DEBs"
                       echo "${distro}_count=${count}" >> "$GITHUB_OUTPUT"
                   done
+                  rm -rf deb-artifacts
+                  df -h /
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Checkout pgEdge action repos
