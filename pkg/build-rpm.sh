@@ -16,7 +16,8 @@ if [ "$ARCH" = "aarch64" ]; then
 fi
 
 # Both source artifacts are staged into the container by the workflow before
-# pgedge-builder-action runs. Their mount paths follow $GITHUB_WORKSPACE → /build.
+# pgedge-builder-action runs. Their mount paths follow
+# $GITHUB_WORKSPACE → /build.
 #
 #   kb.db          — downloaded by the validate-kb-db job from the
 #                    KB_DB_RELEASE_TAG GitHub release, then uploaded as a
@@ -36,25 +37,30 @@ prepare() {
     setup_dnf_build_env
     dnf install -y jq sqlite
 
-    local tarball="pgedge-ai-kb-builder_${BINARY_VERSION}_linux_${ARCH}.tar.gz"
+    # Reconstruct goreleaser's .Version (= the tag minus leading 'v') from
+    # PGEDGE_KB_VERSION + PGEDGE_KB_BUILDNUM. For pre-release tags buildnum
+    # is "<pre>_<iter>" (e.g. beta1_1); strip the trailing "_<iter>" to
+    # recover "<pre>", then join with version. For GA, buildnum is just "1"
+    # and there is no pre-release suffix.
+    if [[ "${PGEDGE_KB_BUILDNUM}" == *_* ]]; then
+        export BUILDER_VERSION="${PGEDGE_KB_VERSION}-${PGEDGE_KB_BUILDNUM%_*}"
+    else
+        export BUILDER_VERSION="${PGEDGE_KB_VERSION}"
+    fi
+
+    local tarball="pgedge-ai-kb-builder_${BUILDER_VERSION}_linux_${ARCH}.tar.gz"
     local tarball_path="${BINARY_TARBALL_DIR}/${tarball}"
 
-    echo "Verifying staged binary tarball at ${tarball_path}..."
     if [ ! -f "${tarball_path}" ]; then
-        echo "Error: binary tarball not found at ${tarball_path}"
-        echo "The build-amd64 / build-arm64 jobs are expected to produce"
-        echo "release-artifacts-<arch>, and the workflow must download that"
-        echo "artifact into pkg/binary.cached/ before this cell runs."
-        echo "Contents of ${BINARY_TARBALL_DIR}:"
+        echo "::error::Binary tarball not found at ${tarball_path}"
         ls -la "${BINARY_TARBALL_DIR}" 2>/dev/null || echo "  (missing)"
         exit 1
     fi
+    echo "Staged binary tarball: ${tarball}"
 
-    echo "Verifying staged kb.db at ${KB_DB_HOST_PATH}..."
     if [ ! -f "${KB_DB_HOST_PATH}" ]; then
-        echo "Error: kb.db not found at ${KB_DB_HOST_PATH}"
-        echo "The validate-kb-db job is expected to fetch it from the"
-        echo "${KB_DB_RELEASE_TAG} GitHub release before this cell runs."
+        echo "::error::kb.db not found at ${KB_DB_HOST_PATH}"
+        echo "validate-kb-db is expected to fetch it from ${KB_DB_RELEASE_TAG} before this cell runs."
         exit 1
     fi
 
@@ -62,31 +68,17 @@ prepare() {
     cp "${COMPONENT_NAME}/rpm/pgedge-postgres-mcp-kb.spec" \
         ~/rpmbuild/SPECS/
 
-    echo "Staging binary tarball from current workflow run..."
+    echo "Staging sources..."
     cp "${tarball_path}" ~/rpmbuild/SOURCES/
-
-    echo "Staging kb.db from current workflow run..."
     cp "${KB_DB_HOST_PATH}" ~/rpmbuild/SOURCES/kb.db
-
-    echo "Staging example config..."
     cp "${COMPONENT_NAME}/common/pgedge-ai-kb-builder.yaml" \
         ~/rpmbuild/SOURCES/
-
-    echo "Rendering VERSION metadata..."
-    sed \
-        -e "s|@@VERSION@@|${PGEDGE_KB_VERSION}-${PGEDGE_KB_RELEASE}|" \
-        -e "s|@@BUILDER_VERSION@@|${BINARY_VERSION}|" \
-        -e "s|@@KB_DB_VERSION@@|${KB_DB_VERSION}|" \
-        -e "s|@@BUILD_DATE@@|$(date -u +%Y-%m-%dT%H:%M:%SZ)|" \
-        -e "s|@@BUILD_COMMIT@@|${GITHUB_SHA:-unknown}|" \
-        -e "s|@@REPO_TYPE@@|${REPO_TYPE}|" \
-        "${COMPONENT_NAME}/common/VERSION.tmpl" > ~/rpmbuild/SOURCES/VERSION
 
     echo "Installing build deps from spec..."
     dnf builddep -y \
         --define "pgedge_kb_version ${PGEDGE_KB_VERSION}" \
-        --define "pgedge_kb_release ${PGEDGE_KB_RELEASE}" \
-        --define "builder_version ${BINARY_VERSION}" \
+        --define "pgedge_kb_buildnum ${PGEDGE_KB_BUILDNUM}" \
+        --define "builder_version ${BUILDER_VERSION}" \
         --define "arch ${ARCH}" \
         ~/rpmbuild/SPECS/pgedge-postgres-mcp-kb.spec
 }
@@ -96,8 +88,8 @@ build() {
     QA_RPATHS=$(( 0xffff )) rpmbuild -ba \
         ~/rpmbuild/SPECS/pgedge-postgres-mcp-kb.spec \
         --define "pgedge_kb_version ${PGEDGE_KB_VERSION}" \
-        --define "pgedge_kb_release ${PGEDGE_KB_RELEASE}" \
-        --define "builder_version ${BINARY_VERSION}" \
+        --define "pgedge_kb_buildnum ${PGEDGE_KB_BUILDNUM}" \
+        --define "builder_version ${BUILDER_VERSION}" \
         --define "arch ${ARCH}"
 }
 

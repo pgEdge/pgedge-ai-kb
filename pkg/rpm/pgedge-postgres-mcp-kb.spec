@@ -6,14 +6,14 @@
 #   - pgedge-ai-kb-builder.yaml (example config)
 #   - VERSION (rendered metadata)
 #
-# Macros %{pgedge_kb_version}, %{pgedge_kb_release}, %{builder_version},
+# Macros %{pgedge_kb_version}, %{pgedge_kb_buildnum}, %{builder_version},
 # and %{arch} are set by build-rpm.sh's rpmbuild --define flags.
 
 %global sname  pgedge-postgres-mcp-kb
 
 Name:       %{sname}
 Version:    %{pgedge_kb_version}
-Release:    %{pgedge_kb_release}%{?dist}
+Release:    %{pgedge_kb_buildnum}%{?dist}
 Summary:    pgEdge PostgreSQL MCP Knowledge Base
 License:    PostgreSQL License
 URL:        https://github.com/pgEdge/pgedge-ai-kb
@@ -21,7 +21,6 @@ URL:        https://github.com/pgEdge/pgedge-ai-kb
 Source0:    pgedge-ai-kb-builder_%{builder_version}_linux_%{arch}.tar.gz
 Source1:    kb.db
 Source2:    pgedge-ai-kb-builder.yaml
-Source3:    VERSION
 
 BuildArch:  %{_arch}
 
@@ -77,12 +76,21 @@ install -m 644 %{SOURCE2} \
     %{buildroot}%{_sysconfdir}/pgedge/pgedge-ai-kb-builder.yaml
 
 # Documentation
-install -m 644 %{SOURCE3} \
-    %{buildroot}%{_defaultdocdir}/%{sname}/VERSION
 install -m 644 %{_builddir}/builder/README.md \
     %{buildroot}%{_defaultdocdir}/%{sname}/README.md
 install -m 644 %{_builddir}/builder/LICENSE.md \
     %{buildroot}%{_defaultdocdir}/%{sname}/LICENSE.md
+
+# VERSION metadata — KB_DB_RELEASE_TAG, GITHUB_SHA, REPO_TYPE flow in
+# from the env exported by build-rpm.sh and pgedge-builder-action.
+cat > %{buildroot}%{_defaultdocdir}/%{sname}/VERSION << EOF
+PGEDGE_POSTGRES_MCP_KB_VERSION=%{version}-%{release}
+BUILDER_VERSION=%{builder_version}
+KB_DB_RELEASE_TAG=${KB_DB_RELEASE_TAG:-unknown}
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_COMMIT=${GITHUB_SHA:-unknown}
+REPO_TYPE=${REPO_TYPE:-unknown}
+EOF
 
 # SBOMs
 install -p -m 644 %{_builddir}/%{sname}-sbom.json \

@@ -38,8 +38,17 @@ override_dh_auto_install:
 		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/LICENSE.md
 	install -D -m 644 builder/README.md \
 		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/README.md
-	install -D -m 644 debian/VERSION \
-		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/VERSION
+
+	# VERSION metadata — env vars come from build-deb.sh / common.sh.
+	install -d debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb
+	{ \
+		echo "PGEDGE_POSTGRES_MCP_KB_VERSION=$${PGEDGE_KB_VERSION}-$${PGEDGE_KB_BUILDNUM}"; \
+		echo "BUILDER_VERSION=$${BUILDER_VERSION}"; \
+		echo "KB_DB_RELEASE_TAG=$${KB_DB_RELEASE_TAG:-unknown}"; \
+		echo "BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		echo "BUILD_COMMIT=$${GITHUB_SHA:-unknown}"; \
+		echo "REPO_TYPE=$${REPO_TYPE:-unknown}"; \
+	} > debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/VERSION
 
 	# --- SBOMs ---
 	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json \

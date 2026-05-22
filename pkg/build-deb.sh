@@ -31,25 +31,28 @@ prepare() {
     setup_apt_build_env
     apt-get install -y jq sqlite3
 
-    local tarball="pgedge-ai-kb-builder_${BINARY_VERSION}_linux_${ARCH}.tar.gz"
+    # Reconstruct goreleaser's .Version (= the tag minus leading 'v'). Same
+    # logic as build-rpm.sh, except common.sh has already converted '_' to
+    # '~' for apt — so the iteration separator we strip is '~'.
+    if [[ "${PGEDGE_KB_BUILDNUM}" == *~* ]]; then
+        export BUILDER_VERSION="${PGEDGE_KB_VERSION}-${PGEDGE_KB_BUILDNUM%~*}"
+    else
+        export BUILDER_VERSION="${PGEDGE_KB_VERSION}"
+    fi
+
+    local tarball="pgedge-ai-kb-builder_${BUILDER_VERSION}_linux_${ARCH}.tar.gz"
     local tarball_path="${BINARY_TARBALL_DIR}/${tarball}"
 
-    echo "Verifying staged binary tarball at ${tarball_path}..."
     if [ ! -f "${tarball_path}" ]; then
-        echo "Error: binary tarball not found at ${tarball_path}"
-        echo "The build-amd64 / build-arm64 jobs are expected to produce"
-        echo "release-artifacts-<arch>, and the workflow must download that"
-        echo "artifact into pkg/binary.cached/ before this cell runs."
-        echo "Contents of ${BINARY_TARBALL_DIR}:"
+        echo "::error::Binary tarball not found at ${tarball_path}"
         ls -la "${BINARY_TARBALL_DIR}" 2>/dev/null || echo "  (missing)"
         exit 1
     fi
+    echo "Staged binary tarball: ${tarball}"
 
-    echo "Verifying staged kb.db at ${KB_DB_HOST_PATH}..."
     if [ ! -f "${KB_DB_HOST_PATH}" ]; then
-        echo "Error: kb.db not found at ${KB_DB_HOST_PATH}"
-        echo "The validate-kb-db job is expected to fetch it from the"
-        echo "${KB_DB_RELEASE_TAG} GitHub release before this cell runs."
+        echo "::error::kb.db not found at ${KB_DB_HOST_PATH}"
+        echo "validate-kb-db is expected to fetch it from ${KB_DB_RELEASE_TAG} before this cell runs."
         exit 1
     fi
 
@@ -57,27 +60,18 @@ prepare() {
     rm -rf "${SRC_DIR}"
     mkdir -p "${SRC_DIR}/builder"
 
-    echo "Extracting binary tarball from current workflow run..."
+    echo "Extracting binary tarball..."
     tar -xzf "${tarball_path}" -C "${SRC_DIR}/builder"
 
-    echo "Staging kb.db from current workflow run..."
+    echo "Staging kb.db..."
     cp "${KB_DB_HOST_PATH}" "${SRC_DIR}/kb.db"
 
     echo "Copying debian/ tree..."
     cp -r "${CWD}/${COMPONENT_NAME}/deb/debian" "${SRC_DIR}/"
 
-    echo "Staging example config + VERSION..."
+    echo "Staging example config..."
     cp "${CWD}/${COMPONENT_NAME}/common/pgedge-ai-kb-builder.yaml" \
         "${SRC_DIR}/debian/"
-    sed \
-        -e "s|@@VERSION@@|${PGEDGE_KB_VERSION_DEB}|" \
-        -e "s|@@BUILDER_VERSION@@|${BINARY_VERSION}|" \
-        -e "s|@@KB_DB_VERSION@@|${KB_DB_VERSION}|" \
-        -e "s|@@BUILD_DATE@@|$(date -u +%Y-%m-%dT%H:%M:%SZ)|" \
-        -e "s|@@BUILD_COMMIT@@|${GITHUB_SHA:-unknown}|" \
-        -e "s|@@REPO_TYPE@@|${REPO_TYPE}|" \
-        "${CWD}/${COMPONENT_NAME}/common/VERSION.tmpl" \
-        > "${SRC_DIR}/debian/VERSION"
 
     echo "Installing build deps..."
     cd "${SRC_DIR}"
@@ -91,10 +85,10 @@ build() {
     distro="$(lsb_release -cs)"
 
     cat > debian/changelog <<EOF
-pgedge-postgres-mcp-kb (${PGEDGE_KB_VERSION_DEB}.${distro}) ${distro}; urgency=medium
+pgedge-postgres-mcp-kb (${PGEDGE_KB_VERSION}-${PGEDGE_KB_BUILDNUM}.${distro}) ${distro}; urgency=medium
 
   * Automated build from ${GITHUB_REF_NAME:-local}
-  * Bundles kb-builder ${BINARY_VERSION} and kb.db ${KB_DB_VERSION}
+  * Bundles kb-builder + kb.db from ${KB_DB_RELEASE_TAG}
 
  -- Muhammad Aqeel <muhammad.aqeel@pgedge.com>  $(date -R)
 EOF

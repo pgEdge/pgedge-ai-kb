@@ -198,10 +198,17 @@ jobs:
                           ;;
                   esac
 
+                  # Extract version + buildnum from the tag.
+                  #   v1.0.0          -> cv=1.0.0      cbn=1
+                  #   v1.0.0-beta1    -> cv=1.0.0      cbn=beta1_1
+                  #   v0.0.1-test1    -> cv=0.0.1      cbn=test1_1
+                  # The trailing "_1" is the package-iteration counter; bump
+                  # COMPONENT_BUILDNUM manually if a second build of the same
+                  # upstream tag is ever needed.
                   ref="${effective_tag#v}"
                   if [[ "${ref}" == *-* ]]; then
                       cv="${ref%%-*}"
-                      cbn="0.${ref#*-}"
+                      cbn="${ref#*-}_1"
                   else
                       cv="${ref}"
                       cbn="1"
@@ -366,16 +373,18 @@ jobs:
                   TARBALL_ARCH: ${{ steps.vars.outputs.tarball-arch }}
               run: |
                   set -euo pipefail
-                  # shellcheck source=pkg/common.sh
-                  source pkg/common.sh
-                  expected="pgedge-ai-kb-builder_${BINARY_VERSION}_linux_${TARBALL_ARCH}.tar.gz"
-                  if [ ! -f "pkg/binary.cached/${expected}" ]; then
-                      echo "::error::Expected ${expected} not found in pkg/binary.cached/"
+                  # Keep only the linux tarball for this arch; drop darwin /
+                  # windows entries that came bundled in release-artifacts-*.
+                  pattern="pgedge-ai-kb-builder_*_linux_${TARBALL_ARCH}.tar.gz"
+                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${pattern}" -delete
+                  shopt -s nullglob
+                  matches=(pkg/binary.cached/${pattern})
+                  shopt -u nullglob
+                  if [ "${#matches[@]}" -ne 1 ]; then
+                      echo "::error::Expected exactly one tarball matching ${pattern}, found ${#matches[@]}"
                       ls -la pkg/binary.cached/
                       exit 1
                   fi
-                  # Drop everything other than the linux tarball for this arch.
-                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${expected}" -delete
                   echo "Staged binary tarball:"
                   ls -la pkg/binary.cached/
 
@@ -587,15 +596,16 @@ jobs:
                   TARBALL_ARCH: ${{ steps.vars.outputs.tarball-arch }}
               run: |
                   set -euo pipefail
-                  # shellcheck source=pkg/common.sh
-                  source pkg/common.sh
-                  expected="pgedge-ai-kb-builder_${BINARY_VERSION}_linux_${TARBALL_ARCH}.tar.gz"
-                  if [ ! -f "pkg/binary.cached/${expected}" ]; then
-                      echo "::error::Expected ${expected} not found in pkg/binary.cached/"
+                  pattern="pgedge-ai-kb-builder_*_linux_${TARBALL_ARCH}.tar.gz"
+                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${pattern}" -delete
+                  shopt -s nullglob
+                  matches=(pkg/binary.cached/${pattern})
+                  shopt -u nullglob
+                  if [ "${#matches[@]}" -ne 1 ]; then
+                      echo "::error::Expected exactly one tarball matching ${pattern}, found ${#matches[@]}"
                       ls -la pkg/binary.cached/
                       exit 1
                   fi
-                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${expected}" -delete
                   echo "Staged binary tarball:"
                   ls -la pkg/binary.cached/
 
