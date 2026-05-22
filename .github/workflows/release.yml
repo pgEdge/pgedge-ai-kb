@@ -537,6 +537,15 @@ jobs:
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+            - name: Reset backup staging dir (EL9)
+              # pgedge-backup-artifacts uses a hardcoded /tmp/repo-backup
+              # that it never cleans. Without this reset, the next
+              # invocation in the same job would include this OS's
+              # packages too. Drop the action-side workaround once the
+              # action itself starts cleaning on entry (see deferred work).
+              if: steps.organize.outputs.el9_count != '0'
+              run: rm -rf /tmp/repo-backup
+
             - name: Back up EL9 RPMs to S3
               if: steps.organize.outputs.el9_count != '0'
               uses: ./.github/actions/pgedge-backup-artifacts
@@ -563,6 +572,10 @@ jobs:
                   rpm-dir: rpms-el10
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Reset backup staging dir (EL10)
+              if: steps.organize.outputs.el10_count != '0'
+              run: rm -rf /tmp/repo-backup
 
             - name: Back up EL10 RPMs to S3
               if: steps.organize.outputs.el10_count != '0'
@@ -785,6 +798,14 @@ jobs:
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+            - name: Reset backup staging dir (jammy)
+              # pgedge-backup-artifacts hardcodes /tmp/repo-backup and never
+              # cleans; calling the action multiple times in one job would
+              # accumulate packages without this reset. See deferred work
+              # to fix this inside the action itself.
+              if: steps.organize.outputs.jammy_count != '0'
+              run: rm -rf /tmp/repo-backup
+
             - name: Back up jammy DEBs to S3
               if: steps.organize.outputs.jammy_count != '0'
               uses: ./.github/actions/pgedge-backup-artifacts
@@ -812,6 +833,10 @@ jobs:
                   gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Reset backup staging dir (noble)
+              if: steps.organize.outputs.noble_count != '0'
+              run: rm -rf /tmp/repo-backup
 
             - name: Back up noble DEBs to S3
               if: steps.organize.outputs.noble_count != '0'
@@ -841,6 +866,10 @@ jobs:
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+            - name: Reset backup staging dir (bullseye)
+              if: steps.organize.outputs.bullseye_count != '0'
+              run: rm -rf /tmp/repo-backup
+
             - name: Back up bullseye DEBs to S3
               if: steps.organize.outputs.bullseye_count != '0'
               uses: ./.github/actions/pgedge-backup-artifacts
@@ -869,6 +898,10 @@ jobs:
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+            - name: Reset backup staging dir (bookworm)
+              if: steps.organize.outputs.bookworm_count != '0'
+              run: rm -rf /tmp/repo-backup
+
             - name: Back up bookworm DEBs to S3
               if: steps.organize.outputs.bookworm_count != '0'
               uses: ./.github/actions/pgedge-backup-artifacts
@@ -896,6 +929,10 @@ jobs:
                   gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Reset backup staging dir (trixie)
+              if: steps.organize.outputs.trixie_count != '0'
+              run: rm -rf /tmp/repo-backup
 
             - name: Back up trixie DEBs to S3
               if: steps.organize.outputs.trixie_count != '0'
