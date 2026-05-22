@@ -454,6 +454,7 @@ jobs:
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_NAME: ${{ github.event.repository.name }}
         steps:
             - name: Free disk space
               # Each RPM cell artifact is ~2GB (binary + src.rpm + kb.db).
@@ -554,7 +555,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: '9'
                   output-dir: rpms-el9
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -585,7 +586,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: '10'
                   output-dir: rpms-el10
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -720,6 +721,7 @@ jobs:
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_NAME: ${{ github.event.repository.name }}
         steps:
             - name: Free disk space
               # 10 DEB cell artifacts × ~1GB each saturate the runner's
@@ -814,7 +816,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: jammy
                   output-dir: debs-jammy
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -846,7 +848,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: noble
                   output-dir: debs-noble
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -878,7 +880,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: bullseye
                   output-dir: debs-bullseye
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -910,7 +912,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: bookworm
                   output-dir: debs-bookworm
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -942,7 +944,7 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   os-version: trixie
                   output-dir: debs-trixie
-                  component-name: pgedge-ai-kb
+                  component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -960,6 +962,8 @@ jobs:
         needs: [determine-repo-type, push-dnf, push-apt]
         if: always() && needs.determine-repo-type.result == 'success'
         runs-on: ubuntu-latest
+        env:
+            COMPONENT_NAME: ${{ github.event.repository.name }}
         steps:
             - name: Install jq + awscli
               run: |
@@ -992,7 +996,7 @@ jobs:
                   dnf_backups='[]'
                   if [ -n "${DNF_TS}" ]; then
                       for os in 9 10; do
-                          path="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${CV}/${DNF_TS}/dnf/${os}/"
+                          path="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
                           dnf_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${dnf_backups}")"
                       done
                   fi
@@ -1000,7 +1004,7 @@ jobs:
                   apt_backups='[]'
                   if [ -n "${APT_TS}" ]; then
                       for distro in jammy noble bullseye bookworm trixie; do
-                          path="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${CV}/${APT_TS}/apt/${distro}/"
+                          path="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
                           apt_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${apt_backups}")"
                       done
                   fi
@@ -1012,7 +1016,7 @@ jobs:
                       --arg     tag                 "${EFFECTIVE_TAG}" \
                       --argjson simulated           "${SIMULATED}" \
                       --arg     commit_sha          "${GITHUB_SHA}" \
-                      --arg     component_name      "pgedge-ai-kb" \
+                      --arg     component_name      "${COMPONENT_NAME}" \
                       --arg     component_version   "${CV}" \
                       --arg     component_buildnum  "${CBN}" \
                       --arg     kb_db_release_tag   "${KB_TAG}" \
@@ -1073,9 +1077,14 @@ jobs:
                   AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
                   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
                   S3_BACKUP_BUCKET:      ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE:             ${{ needs.determine-repo-type.outputs.repo-type }}
+                  CV:                    ${{ needs.determine-repo-type.outputs.component-version }}
               run: |
                   set -euo pipefail
-                  key="_runs/${GITHUB_RUN_ID}-r${GITHUB_RUN_ATTEMPT}.json"
+                  # Path mirrors the per-package backup scheme so the bucket
+                  # is browsable by repo-type → component → version → run.
+                  # e.g. _runs/daily/pgedge-ai-kb/1.0.0/26286392903-r1.json
+                  key="_runs/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${GITHUB_RUN_ID}-r${GITHUB_RUN_ATTEMPT}.json"
                   aws s3 cp aggregated/manifest.json "s3://${S3_BACKUP_BUCKET}/${key}"
                   echo "Aggregated manifest uploaded to s3://${S3_BACKUP_BUCKET}/${key}"
 
