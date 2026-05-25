@@ -6,8 +6,8 @@
 #   - pgedge-ai-kb-builder.yaml (example config)
 #   - VERSION (rendered metadata)
 #
-# Macros %{pgedge_kb_version}, %{pgedge_kb_buildnum}, %{builder_version},
-# and %{arch} are set by build-rpm.sh's rpmbuild --define flags.
+# Macros %%{pgedge_kb_version}, %%{pgedge_kb_buildnum}, %%{builder_version},
+# and %%{arch} are set by build-rpm.sh's rpmbuild --define flags.
 
 %global sname  pgedge-postgres-mcp-kb
 
