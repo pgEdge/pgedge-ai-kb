@@ -403,11 +403,11 @@ jobs:
               run: |
                   set -euo pipefail
                   mkdir -p .github/actions
-                  for repo in pgedge-builder-action pgedge-backup-artifacts pgedge-dnf-repo-builder; do
-                      git clone --depth 1 \
-                          "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
-                          ".github/actions/${repo}"
-                  done
+                  # Build cells only need the builder action — backup +
+                  # repo-builder live in push-dnf / push-apt jobs now.
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-builder-action.git" \
+                      ".github/actions/pgedge-builder-action"
 
             - name: Build RPM
               uses: ./.github/actions/pgedge-builder-action
@@ -505,7 +505,6 @@ jobs:
                       shopt -u nullglob
                       count=$(find "rpms-el${os_version}" -maxdepth 1 -name '*.rpm' | wc -l)
                       echo "EL${os_version}: ${count} RPMs"
-                      echo "el${os_version}_count=${count}" >> "$GITHUB_OUTPUT"
                   done
                   # Drop the now-empty download dir to reclaim its space.
                   rm -rf rpm-artifacts
@@ -513,82 +512,53 @@ jobs:
                   # Single timestamp shared by all backups in this push job.
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
-            - name: Checkout pgEdge action repos
+            - name: Checkout pgEdge action repos @multi-target
               env:
                   TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
               run: |
                   set -euo pipefail
                   mkdir -p .github/actions
+                  # Pinned to the multi-target branch so this repo's pipeline
+                  # is the only consumer of the new batched-targets path.
+                  # Other repos still pin @main and see no behavior change.
                   for repo in pgedge-dnf-repo-builder pgedge-backup-artifacts; do
-                      git clone --depth 1 \
+                      git clone --depth 1 --branch multi-target \
                           "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
                           ".github/actions/${repo}"
                   done
 
-            # ---------- EL 9 ----------
-            - name: Push EL9 RPMs to yum repo
-              if: steps.organize.outputs.el9_count != '0'
+            - name: Push RPMs to yum repo (EL9 + EL10 batched)
               uses: ./.github/actions/pgedge-dnf-repo-builder
               with:
                   s3-bucket: ${{ secrets.S3_BUCKET_NAME }}
                   cf-distribution: ${{ secrets.CLOUDFRONT_DISTRIBUTION }}
                   repo-type: ${{ env.REPO_TYPE }}
-                  os-version: '9'
-                  rpm-dir: rpms-el9
+                  # Both OSes in one invocation. Empty rpm-dirs (e.g. under
+                  # force_push partial failure) are skipped inside the action.
+                  targets: |
+                      [
+                        {"os-version": "9",  "rpm-dir": "rpms-el9"},
+                        {"os-version": "10", "rpm-dir": "rpms-el10"}
+                      ]
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-            - name: Reset backup staging dir (EL9)
-              # pgedge-backup-artifacts uses a hardcoded /tmp/repo-backup
-              # that it never cleans. Without this reset, the next
-              # invocation in the same job would include this OS's
-              # packages too. Drop the action-side workaround once the
-              # action itself starts cleaning on entry (see deferred work).
-              if: steps.organize.outputs.el9_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up EL9 RPMs to S3
-              if: steps.organize.outputs.el9_count != '0'
+            - name: Back up RPMs to S3 (EL9 + EL10 batched)
               uses: ./.github/actions/pgedge-backup-artifacts
               with:
                   s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   repo-type: ${{ env.REPO_TYPE }}
-                  os-version: '9'
-                  output-dir: rpms-el9
                   component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # ---------- EL 10 ----------
-            - name: Push EL10 RPMs to yum repo
-              if: steps.organize.outputs.el10_count != '0'
-              uses: ./.github/actions/pgedge-dnf-repo-builder
-              with:
-                  s3-bucket: ${{ secrets.S3_BUCKET_NAME }}
-                  cf-distribution: ${{ secrets.CLOUDFRONT_DISTRIBUTION }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-version: '10'
-                  rpm-dir: rpms-el10
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            - name: Reset backup staging dir (EL10)
-              if: steps.organize.outputs.el10_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up EL10 RPMs to S3
-              if: steps.organize.outputs.el10_count != '0'
-              uses: ./.github/actions/pgedge-backup-artifacts
-              with:
-                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-version: '10'
-                  output-dir: rpms-el10
-                  component-name: ${{ env.COMPONENT_NAME }}
-                  component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
+                  # mktemp -d inside the action gives each target its own
+                  # staging dir; the old "Reset backup staging dir" steps
+                  # are no longer needed.
+                  targets: |
+                      [
+                        {"os-version": "9",  "output-dir": "rpms-el9"},
+                        {"os-version": "10", "output-dir": "rpms-el10"}
+                      ]
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
@@ -673,11 +643,11 @@ jobs:
               run: |
                   set -euo pipefail
                   mkdir -p .github/actions
-                  for repo in pgedge-builder-action pgedge-backup-artifacts pgedge-apt-repo-builder; do
-                      git clone --depth 1 \
-                          "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
-                          ".github/actions/${repo}"
-                  done
+                  # Build cells only need the builder action — backup +
+                  # repo-builder live in push-dnf / push-apt jobs now.
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-builder-action.git" \
+                      ".github/actions/pgedge-builder-action"
 
             - name: Build DEB
               uses: ./.github/actions/pgedge-builder-action
@@ -768,185 +738,74 @@ jobs:
                       shopt -u nullglob
                       count=$(find "debs-${distro}" -maxdepth 1 -name '*.deb' | wc -l)
                       echo "${distro}: ${count} DEBs"
-                      echo "${distro}_count=${count}" >> "$GITHUB_OUTPUT"
                   done
                   rm -rf deb-artifacts
                   df -h /
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
-            - name: Checkout pgEdge action repos
+            - name: Checkout pgEdge action repos @multi-target
               env:
                   TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
               run: |
                   set -euo pipefail
                   mkdir -p .github/actions
+                  # Pinned to the multi-target branch — see push-dnf for
+                  # the rationale.
                   for repo in pgedge-apt-repo-builder pgedge-backup-artifacts; do
-                      git clone --depth 1 \
+                      git clone --depth 1 --branch multi-target \
                           "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
                           ".github/actions/${repo}"
                   done
 
-            # ---------- jammy ----------
-            - name: Push jammy DEBs to apt repo
-              if: steps.organize.outputs.jammy_count != '0'
+            - name: Push DEBs to apt repo (all 5 distros batched)
               uses: ./.github/actions/pgedge-apt-repo-builder
               with:
                   s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
                   cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
                   repo-type: ${{ env.REPO_TYPE }}
-                  os-name: 'ubuntu:jammy'
-                  deb-dir: debs-jammy
+                  # All 5 distros in one invocation. One reprepro setup,
+                  # one CloudFront invalidate covering all distro prefixes.
+                  # Empty deb-dirs (under force_push partial failure) are
+                  # skipped inside the action.
+                  # When ubuntu:resolute joins the build matrix, add a
+                  # debs-resolute cell to package-deb and insert this entry
+                  # into the targets array below (and into the backup
+                  # targets a few lines down):
+                  #   {"os-name": "ubuntu:resolute", "deb-dir": "debs-resolute"}
+                  targets: |
+                      [
+                        {"os-name": "ubuntu:jammy",    "deb-dir": "debs-jammy"},
+                        {"os-name": "ubuntu:noble",    "deb-dir": "debs-noble"},
+                        {"os-name": "debian:bullseye", "deb-dir": "debs-bullseye"},
+                        {"os-name": "debian:bookworm", "deb-dir": "debs-bookworm"},
+                        {"os-name": "debian:trixie",   "deb-dir": "debs-trixie"}
+                      ]
                   gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-            - name: Reset backup staging dir (jammy)
-              # pgedge-backup-artifacts hardcodes /tmp/repo-backup and never
-              # cleans; calling the action multiple times in one job would
-              # accumulate packages without this reset. See deferred work
-              # to fix this inside the action itself.
-              if: steps.organize.outputs.jammy_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up jammy DEBs to S3
-              if: steps.organize.outputs.jammy_count != '0'
+            - name: Back up DEBs to S3 (all 5 distros batched)
               uses: ./.github/actions/pgedge-backup-artifacts
               with:
                   s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   repo-type: ${{ env.REPO_TYPE }}
-                  os-version: jammy
-                  output-dir: debs-jammy
                   component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
                   timestamp: ${{ steps.organize.outputs.timestamp }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # ---------- noble ----------
-            - name: Push noble DEBs to apt repo
-              if: steps.organize.outputs.noble_count != '0'
-              uses: ./.github/actions/pgedge-apt-repo-builder
-              with:
-                  s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
-                  cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-name: 'ubuntu:noble'
-                  deb-dir: debs-noble
-                  gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            - name: Reset backup staging dir (noble)
-              if: steps.organize.outputs.noble_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up noble DEBs to S3
-              if: steps.organize.outputs.noble_count != '0'
-              uses: ./.github/actions/pgedge-backup-artifacts
-              with:
-                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-version: noble
-                  output-dir: debs-noble
-                  component-name: ${{ env.COMPONENT_NAME }}
-                  component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # ---------- bullseye ----------
-            - name: Push bullseye DEBs to apt repo
-              if: steps.organize.outputs.bullseye_count != '0'
-              uses: ./.github/actions/pgedge-apt-repo-builder
-              with:
-                  s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
-                  cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-name: 'debian:bullseye'
-                  deb-dir: debs-bullseye
-                  gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            - name: Reset backup staging dir (bullseye)
-              if: steps.organize.outputs.bullseye_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up bullseye DEBs to S3
-              if: steps.organize.outputs.bullseye_count != '0'
-              uses: ./.github/actions/pgedge-backup-artifacts
-              with:
-                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-version: bullseye
-                  output-dir: debs-bullseye
-                  component-name: ${{ env.COMPONENT_NAME }}
-                  component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # ---------- bookworm ----------
-            - name: Push bookworm DEBs to apt repo
-              if: steps.organize.outputs.bookworm_count != '0'
-              uses: ./.github/actions/pgedge-apt-repo-builder
-              with:
-                  s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
-                  cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-name: 'debian:bookworm'
-                  deb-dir: debs-bookworm
-                  gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            - name: Reset backup staging dir (bookworm)
-              if: steps.organize.outputs.bookworm_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up bookworm DEBs to S3
-              if: steps.organize.outputs.bookworm_count != '0'
-              uses: ./.github/actions/pgedge-backup-artifacts
-              with:
-                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-version: bookworm
-                  output-dir: debs-bookworm
-                  component-name: ${{ env.COMPONENT_NAME }}
-                  component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # ---------- trixie ----------
-            - name: Push trixie DEBs to apt repo
-              if: steps.organize.outputs.trixie_count != '0'
-              uses: ./.github/actions/pgedge-apt-repo-builder
-              with:
-                  s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
-                  cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-name: 'debian:trixie'
-                  deb-dir: debs-trixie
-                  gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            - name: Reset backup staging dir (trixie)
-              if: steps.organize.outputs.trixie_count != '0'
-              run: rm -rf /tmp/repo-backup
-
-            - name: Back up trixie DEBs to S3
-              if: steps.organize.outputs.trixie_count != '0'
-              uses: ./.github/actions/pgedge-backup-artifacts
-              with:
-                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
-                  repo-type: ${{ env.REPO_TYPE }}
-                  os-version: trixie
-                  output-dir: debs-trixie
-                  component-name: ${{ env.COMPONENT_NAME }}
-                  component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
+                  # mktemp -d inside the action gives each target its own
+                  # staging dir; the old "Reset backup staging dir" steps
+                  # are no longer needed.
+                  #
+                  # When ubuntu:resolute joins the matrix, add:
+                  #   {"os-version": "resolute", "output-dir": "debs-resolute"}
+                  targets: |
+                      [
+                        {"os-version": "jammy",    "output-dir": "debs-jammy"},
+                        {"os-version": "noble",    "output-dir": "debs-noble"},
+                        {"os-version": "bullseye", "output-dir": "debs-bullseye"},
+                        {"os-version": "bookworm", "output-dir": "debs-bookworm"},
+                        {"os-version": "trixie",   "output-dir": "debs-trixie"}
+                      ]
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
