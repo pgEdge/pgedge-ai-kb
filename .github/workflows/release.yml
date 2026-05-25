@@ -540,6 +540,10 @@ jobs:
                         {"os-version": "9",  "rpm-dir": "rpms-el9"},
                         {"os-version": "10", "rpm-dir": "rpms-el10"}
                       ]
+                  # Cross-repo push lock — every consumer that touches
+                  # dnf.pgedge.com must pass this so they all serialize
+                  # against the same _dnf_lock/ prefix.
+                  lock-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
@@ -780,6 +784,10 @@ jobs:
                         {"os-name": "debian:bookworm", "deb-dir": "debs-bookworm"},
                         {"os-name": "debian:trixie",   "deb-dir": "debs-trixie"}
                       ]
+                  # Cross-repo push lock — every consumer that touches
+                  # apt.pgedge.com must pass this so they all serialize
+                  # against the same _apt_lock/ prefix.
+                  lock-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
