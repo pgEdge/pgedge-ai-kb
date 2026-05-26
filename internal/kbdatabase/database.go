@@ -66,6 +66,7 @@ func (d *Database) createSchema() error {
         openai_embedding BLOB,
         voyage_embedding BLOB,
         ollama_embedding BLOB,
+        gemini_embedding BLOB,
 
         -- Metadata
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
