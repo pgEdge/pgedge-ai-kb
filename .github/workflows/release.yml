@@ -15,6 +15,11 @@ on:
                 required: false
                 type: boolean
                 default: false
+            regenerate_kb_db:
+                description: 'Regenerate kb.db from scratch (default). Set false to use the latest published kb-* GitHub release instead. Skipping regen saves hours + API credits but ships whatever was last published.'
+                required: false
+                type: boolean
+                default: true
 
 permissions:
     contents: write
@@ -115,7 +120,9 @@ jobs:
     release:
         name: Create Release
         runs-on: ubuntu-latest
-        needs: [build-amd64, build-arm64]
+        # Wait for the kb.db pipeline too so the GH release can include it
+        # as a downloadable asset alongside the binary tarballs.
+        needs: [build-amd64, build-arm64, validate-kb-db]
         if: github.ref_type == 'tag'
         steps:
             - name: Checkout code
@@ -135,10 +142,20 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist/
 
+            - name: Download kb.db
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: dist/
+
             - name: Generate checksums
               run: |
                   cd dist
-                  sha256sum *.tar.gz *.zip > checksums.txt
+                  # RELEASE_TAG is an internal coordination file (consumed
+                  # by build-rpm.sh / build-deb.sh inside the build container)
+                  # and isn't a user-facing artifact, so it's not checksummed
+                  # and isn't listed in the release files below.
+                  sha256sum *.tar.gz *.zip kb.db > checksums.txt
                   cat checksums.txt
 
             - name: Create GitHub Release
@@ -147,6 +164,7 @@ jobs:
                   files: |
                       dist/*.tar.gz
                       dist/*.zip
+                      dist/kb.db
                       dist/checksums.txt
                   generate_release_notes: true
                   draft: false
@@ -169,7 +187,6 @@ jobs:
             repo-type: ${{ steps.ctx.outputs.repo-type }}
             component-version: ${{ steps.ctx.outputs.component-version }}
             component-buildnum: ${{ steps.ctx.outputs.component-buildnum }}
-            kb-db-release-tag: ${{ steps.ctx.outputs.kb-db-release-tag }}
             effective-tag: ${{ steps.ctx.outputs.effective-tag }}
             simulated: ${{ steps.ctx.outputs.simulated }}
         steps:
@@ -224,49 +241,251 @@ jobs:
                       cbn="1"
                   fi
 
-                  # Source pkg/common.sh to recover KB_DB_RELEASE_TAG (the
-                  # single source of truth for which kb.db release to bundle).
-                  export COMPONENT_VERSION="${cv}"
-                  export COMPONENT_BUILDNUM="${cbn}"
-                  # shellcheck source=pkg/common.sh
-                  source pkg/common.sh
-
-                  echo "repo-type=${repo_type}"                 >> "$GITHUB_OUTPUT"
-                  echo "component-version=${cv}"                >> "$GITHUB_OUTPUT"
-                  echo "component-buildnum=${cbn}"              >> "$GITHUB_OUTPUT"
-                  echo "kb-db-release-tag=${KB_DB_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-                  echo "effective-tag=${effective_tag}"         >> "$GITHUB_OUTPUT"
-                  echo "simulated=${simulated}"                 >> "$GITHUB_OUTPUT"
+                  echo "repo-type=${repo_type}"         >> "$GITHUB_OUTPUT"
+                  echo "component-version=${cv}"        >> "$GITHUB_OUTPUT"
+                  echo "component-buildnum=${cbn}"      >> "$GITHUB_OUTPUT"
+                  echo "effective-tag=${effective_tag}" >> "$GITHUB_OUTPUT"
+                  echo "simulated=${simulated}"         >> "$GITHUB_OUTPUT"
 
                   echo "Tag:                ${effective_tag}"
                   echo "Simulated:          ${simulated}"
                   echo "Repo type:          ${repo_type}"
                   echo "Component version:  ${cv}"
                   echo "Component buildnum: ${cbn}"
-                  echo "KB DB release tag:  ${KB_DB_RELEASE_TAG}"
-                  echo "PGEDGE_KB_VERSION:  ${PGEDGE_KB_VERSION}"
-                  echo "PGEDGE_KB_BUILDNUM: ${PGEDGE_KB_BUILDNUM}"
+
+    # -------------------------------------------------------------------------
+    # kb.db sourcing — either generate inline or discover latest published.
+    # Exactly one of generate-kb-db / discover-kb-db runs per workflow run;
+    # both produce the same artifact name `kb-db-validated` containing kb.db
+    # plus a RELEASE_TAG file. validate-kb-db is the downstream gate.
+    # -------------------------------------------------------------------------
+
+    generate-kb-db:
+        name: Generate kb.db (inline)
+        needs: determine-repo-type
+        # Default behavior is to regenerate. Set workflow_dispatch input
+        # `regenerate_kb_db: false` to skip and use the latest published
+        # kb-* release instead.
+        if: github.event.inputs.regenerate_kb_db != 'false'
+        runs-on: [ollama, self-hosted]
+        outputs:
+            kb-db-release-tag: ${{ steps.tag.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+              with:
+                  fetch-depth: 0
+
+            - name: Clean build artifacts from previous runs
+              run: rm -rf bin/ pgedge-ai-kb-builder examples/pgedge-ai-kb-builder-build.yaml
+
+            - name: Set up Go
+              uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+              with:
+                  go-version: '1.25'
+                  cache: true
+
+            - name: Configure git for private repo access
+              env:
+                  PGEDGE_BUILDER_TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  [ -n "$PGEDGE_BUILDER_TOKEN" ] || { echo "PGEDGE_BUILDER_TOKEN secret is missing"; exit 1; }
+                  echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+                  printf '' > "$RUNNER_TEMP/gitconfig"
+                  GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global credential.helper ""
+                  GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global url."https://x-access-token:${PGEDGE_BUILDER_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+            - name: Start Ollama service
+              run: |
+                  ollama serve &
+                  echo $! > "$RUNNER_TEMP/ollama.pid"
+                  timeout=60; elapsed=0
+                  until curl -s http://localhost:11434/api/tags > /dev/null; do
+                    sleep 2; elapsed=$((elapsed + 2))
+                    if [ "$elapsed" -ge "$timeout" ]; then echo "Ollama did not start within ${timeout}s"; exit 1; fi
+                  done
+                  ollama pull nomic-embed-text
+                  echo "Ollama ready with nomic-embed-text"
+
+            - name: Build kb-builder binary
+              run: CGO_ENABLED=0 go build -o pgedge-ai-kb-builder ./cmd/kb-builder
+
+            - name: Setup API keys for kb-builder
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
+                  [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
+                  mkdir -p "$API_KEYS_DIR"
+                  printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
+                  printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
+                  chmod 600 "$API_KEYS_DIR"/*
+
+            - name: Configure kb-builder for cloud providers
+              env:
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  cp examples/pgedge-ai-kb-builder.yaml examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' 's|git@github.com:|https://github.com/|g' examples/pgedge-ai-kb-builder-build.yaml
+                  grep -q 'database_path: "bin/kb.db"' examples/pgedge-ai-kb-builder-build.yaml || { echo "database_path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "OpenAI key path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "Voyage key path replacement failed"; exit 1; }
+                  grep -q 'https://github.com/' examples/pgedge-ai-kb-builder-build.yaml || { echo "SSH URL replacement failed"; exit 1; }
+
+            - name: Generate kb.db (capturing log for coverage check)
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+              run: |
+                  mkdir -p bin
+                  # Tee preserves the log for the per-provider coverage check
+                  # while still streaming to the workflow's live log.
+                  ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50 \
+                    2>&1 | tee bin/kb-builder.log
+
+            - name: Verify kb.db was created
+              run: |
+                  [ -f "bin/kb.db" ] || { echo "::error::bin/kb.db was not created"; exit 1; }
+                  echo "kb.db size: $(du -sh bin/kb.db | cut -f1)"
+
+            - name: Verify per-provider coverage (OpenAI, Voyage, Ollama)
+              # Each provider must log a "<Provider>: Processed N/M chunks"
+              # line where the LAST such line shows N == M (every batch
+              # finished). Strict mode: all three providers must be present.
+              # If a provider is intentionally disabled in the config, this
+              # check will fail — that's intentional per release policy.
+              run: |
+                  set -euo pipefail
+                  log=bin/kb-builder.log
+                  [ -f "$log" ] || { echo "::error::kb-builder.log missing"; exit 1; }
+
+                  fail=0
+                  for provider in OpenAI Voyage Ollama; do
+                      last=$(grep -E "^[[:space:]]*${provider}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
+                      if [ -z "$last" ]; then
+                          echo "::error::${provider}: no 'Processed X/Y chunks' lines in log (provider missing or disabled)"
+                          fail=1
+                          continue
+                      fi
+                      done=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\1|')
+                      total=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\2|')
+                      if [ "$done" = "$total" ]; then
+                          echo "${provider}: ${done}/${total} ✓"
+                      else
+                          echo "::error::${provider} embedded only ${done} of ${total} chunks"
+                          fail=1
+                      fi
+                  done
+                  [ "$fail" = "0" ] || exit 1
+
+            - name: Compute synthetic release tag
+              id: tag
+              run: |
+                  # Synthetic tag for an inline-generated kb.db. Embeds the
+                  # workflow run ID so packaging traces back unambiguously.
+                  tag="kb-$(date -u +%Y-%m-%d)-r${GITHUB_RUN_ID}"
+                  echo "kb-db-release-tag=${tag}" >> "$GITHUB_OUTPUT"
+                  echo "${tag}" > bin/RELEASE_TAG
+                  echo "Generated: ${tag}"
+
+            - name: Cleanup (ollama + API keys)
+              if: always()
+              env:
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  if [ -f "$RUNNER_TEMP/ollama.pid" ]; then
+                    kill "$(cat "$RUNNER_TEMP/ollama.pid")" 2>/dev/null || true
+                    rm -f "$RUNNER_TEMP/ollama.pid"
+                  fi
+                  rm -rf "$API_KEYS_DIR"
+                  rm -f "$RUNNER_TEMP/gitconfig"
+
+            - name: Upload kb-db-validated artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-validated
+                  path: |
+                      bin/kb.db
+                      bin/RELEASE_TAG
+                  retention-days: 7
+
+    discover-kb-db:
+        name: Discover latest published kb.db
+        needs: determine-repo-type
+        # Opt-in alternative path when regenerate_kb_db=false. Downloads
+        # whatever the most recent kb-* GitHub release is. Useful for
+        # iterating on packaging without spending hours regenerating.
+        if: github.event.inputs.regenerate_kb_db == 'false'
+        runs-on: ubuntu-latest
+        outputs:
+            kb-db-release-tag: ${{ steps.find.outputs.kb-db-release-tag }}
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - name: Find latest kb-* release
+              id: find
+              run: |
+                  set -euo pipefail
+                  tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+                      --jq '[.[] | select(.tag_name | startswith("kb-"))] | .[0].tag_name')
+                  if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+                      echo "::error::No kb-* releases found in ${GITHUB_REPOSITORY}"
+                      exit 1
+                  fi
+                  echo "kb-db-release-tag=${tag}" >> "$GITHUB_OUTPUT"
+                  echo "Latest kb-* release: ${tag}"
+
+            - name: Download kb.db
+              env:
+                  KB_TAG: ${{ steps.find.outputs.kb-db-release-tag }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p bin
+                  gh release download "${KB_TAG}" \
+                      --repo "${GITHUB_REPOSITORY}" \
+                      --pattern 'kb.db' \
+                      --dir bin
+                  echo "${KB_TAG}" > bin/RELEASE_TAG
+                  ls -lh bin/
+
+            - name: Upload kb-db-validated artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-validated
+                  path: |
+                      bin/kb.db
+                      bin/RELEASE_TAG
+                  retention-days: 7
 
     validate-kb-db:
         name: Validate kb.db
         runs-on: ubuntu-latest
-        needs: determine-repo-type
-        env:
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+        # Gate downstream packaging. Runs after whichever upstream produced
+        # the artifact; downstream `needs: validate-kb-db` ensures sequencing.
+        needs: [determine-repo-type, generate-kb-db, discover-kb-db]
+        if: |
+            always() && (
+              needs.generate-kb-db.result == 'success' ||
+              needs.discover-kb-db.result == 'success'
+            )
+        outputs:
+            # Proxy the upstream's tag so downstream consumers have one
+            # place to look (whether the kb.db was generated or discovered).
+            kb-db-release-tag: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
         steps:
             - name: Install sqlite3
               run: sudo apt-get update && sudo apt-get install -y sqlite3
 
-            - name: Download kb.db from kb release
-              run: |
-                  set -euo pipefail
-                  mkdir -p kb.db.cached
-                  gh release download "${KB_TAG}" \
-                      --repo "${GITHUB_REPOSITORY}" \
-                      --pattern 'kb.db' \
-                      --dir kb.db.cached
-                  ls -lh kb.db.cached/
+            - name: Download kb-db-validated artifact
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: kb.db.cached/
 
             - name: Validate schema, row counts, embedding dimensions
               run: |
@@ -299,10 +518,13 @@ jobs:
                       exit 1
                   fi
 
-                  # Embedding-dimension consistency: each provider column must
-                  # have a single distinct BLOB length across all rows where
-                  # set. Columns may be NULL for chunks not embedded by that
-                  # provider — those rows are excluded from the check.
+                  # Embedding-dimension consistency: each provider column
+                  # must have a single distinct BLOB length across all rows
+                  # where set. Columns may be NULL for chunks not embedded
+                  # by that provider — those rows are excluded from the
+                  # check. (The strict per-provider coverage assertion lives
+                  # in generate-kb-db; this is the basic sanity check that
+                  # both inline and discovered kb.db files pass through.)
                   for col in openai_embedding voyage_embedding ollama_embedding; do
                       dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;" || true)
                       if [ -z "${dims}" ]; then
@@ -319,31 +541,25 @@ jobs:
 
                   echo "kb.db validation passed"
 
-            - name: Upload validated kb.db
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-validated
-                  path: kb.db.cached/kb.db
-                  retention-days: 7
-
     # -------------------------------------------------------------------------
     # RPM packaging
     # -------------------------------------------------------------------------
 
     package-rpm:
-        name: Package RPM (${{ matrix.image }} ${{ matrix.arch }})
-        needs: [determine-repo-type, validate-kb-db, build-amd64, build-arm64]
-        runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+        name: Package RPM (${{ matrix.image }} noarch)
+        needs: [determine-repo-type, validate-kb-db]
+        runs-on: ubuntu-latest
+        # Package is noarch (data-only kb.db). One cell per EL major; built
+        # on amd64 runner since the resulting RPM is arch-independent.
         strategy:
             fail-fast: false
             matrix:
                 image: ['almalinux:9', 'almalinux:10']
-                arch: [amd64, arm64]
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
-            KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+            KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -357,12 +573,7 @@ jobs:
                       *:10) os_version=10 ;;
                       *)    echo "::error::Unexpected image ${{ matrix.image }}"; exit 1 ;;
                   esac
-                  case "${{ matrix.arch }}" in
-                      amd64) tarball_arch=x86_64 ;;
-                      arm64) tarball_arch=arm64  ;;
-                  esac
                   echo "os-version=${os_version}"     >> "$GITHUB_OUTPUT"
-                  echo "tarball-arch=${tarball_arch}" >> "$GITHUB_OUTPUT"
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Download validated kb.db
@@ -370,32 +581,6 @@ jobs:
               with:
                   name: kb-db-validated
                   path: pkg/kb.db.cached/
-
-            - name: Download binary tarball for this arch
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  name: release-artifacts-${{ matrix.arch }}
-                  path: pkg/binary.cached/
-
-            - name: Filter binary cache to current-tag linux tarball
-              env:
-                  TARBALL_ARCH: ${{ steps.vars.outputs.tarball-arch }}
-              run: |
-                  set -euo pipefail
-                  # Keep only the linux tarball for this arch; drop darwin /
-                  # windows entries that came bundled in release-artifacts-*.
-                  pattern="pgedge-ai-kb-builder_*_linux_${TARBALL_ARCH}.tar.gz"
-                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${pattern}" -delete
-                  shopt -s nullglob
-                  matches=(pkg/binary.cached/${pattern})
-                  shopt -u nullglob
-                  if [ "${#matches[@]}" -ne 1 ]; then
-                      echo "::error::Expected exactly one tarball matching ${pattern}, found ${#matches[@]}"
-                      ls -la pkg/binary.cached/
-                      exit 1
-                  fi
-                  echo "Staged binary tarball:"
-                  ls -la pkg/binary.cached/
 
             - name: Checkout pgEdge action repos
               env:
@@ -413,7 +598,7 @@ jobs:
               uses: ./.github/actions/pgedge-builder-action
               with:
                   image: ${{ matrix.image }}
-                  arch: ${{ matrix.arch }}
+                  arch: amd64
                   component_name: pkg
                   component_version: ${{ env.COMPONENT_VERSION }}
                   component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
@@ -425,8 +610,8 @@ jobs:
             - name: Upload RPM cell artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: rpm__el-${{ steps.vars.outputs.os-version }}__${{ matrix.arch }}
-                  path: output/el${{ steps.vars.outputs.os-version }}-${{ matrix.arch }}/
+                  name: rpm__el-${{ steps.vars.outputs.os-version }}
+                  path: output/el${{ steps.vars.outputs.os-version }}-amd64/
                   retention-days: 7
 
     push-dnf:
@@ -456,59 +641,32 @@ jobs:
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_NAME: ${{ github.event.repository.name }}
         steps:
-            - name: Free disk space
-              # Each RPM cell artifact is ~2GB (binary + src.rpm + kb.db).
-              # 4 of them, extracted, then copied into rpms-el{9,10}/, easily
-              # exceeds the runner's default ~14GB free space. Strip the
-              # large pre-installed toolchains we don't use (.NET, Android,
-              # Haskell, Java, CodeQL) to free ~25-30GB before download.
-              run: |
-                  set -eu
-                  echo "Before cleanup:"
-                  df -h /
-                  sudo rm -rf \
-                      /usr/share/dotnet \
-                      /usr/local/lib/android \
-                      /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL \
-                      /usr/local/share/boost \
-                      /usr/local/lib/node_modules
-                  sudo apt-get clean
-                  echo "After cleanup:"
-                  df -h /
-
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
             - name: Download all RPM cell artifacts
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
-                  pattern: rpm__el-*__*
+                  pattern: rpm__el-*
                   path: rpm-artifacts
-                  # Keep per-cell subdirs so we can identify each RPM's EL major.
+                  # Keep per-cell subdirs (one per EL major). Package is
+                  # noarch so there's no arch dimension anymore.
                   merge-multiple: false
 
             - name: Organize RPMs by EL major
               id: organize
               run: |
                   set -euo pipefail
-                  # mv (not cp) so we don't keep two copies of multi-GB RPMs
-                  # on the runner's small disk. The rpm-artifacts/ tree is no
-                  # longer needed after this step.
                   for os_version in 9 10; do
                       mkdir -p "rpms-el${os_version}"
-                      shopt -s nullglob
-                      for src_dir in rpm-artifacts/rpm__el-${os_version}__*; do
-                          [ -d "${src_dir}" ] || continue
+                      src_dir="rpm-artifacts/rpm__el-${os_version}"
+                      if [ -d "${src_dir}" ]; then
                           find "${src_dir}" -type f -name '*.rpm' -exec mv -v {} "rpms-el${os_version}/" \;
-                      done
-                      shopt -u nullglob
+                      fi
                       count=$(find "rpms-el${os_version}" -maxdepth 1 -name '*.rpm' | wc -l)
                       echo "EL${os_version}: ${count} RPMs"
                   done
-                  # Drop the now-empty download dir to reclaim its space.
                   rm -rf rpm-artifacts
-                  df -h /
                   # Single timestamp shared by all backups in this push job.
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
@@ -574,28 +732,25 @@ jobs:
     # -------------------------------------------------------------------------
 
     package-deb:
-        name: Package DEB (${{ matrix.image }} ${{ matrix.arch }})
-        needs: [determine-repo-type, validate-kb-db, build-amd64, build-arm64]
-        runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+        name: Package DEB (${{ matrix.image }} all)
+        needs: [determine-repo-type, validate-kb-db]
+        runs-on: ubuntu-latest
+        # Package is Architecture: all (data-only kb.db). One cell per distro;
+        # built on amd64 runner since the resulting DEB is arch-independent.
         strategy:
             fail-fast: false
             matrix:
                 include:
-                    - { image: 'ubuntu:jammy',    distro: jammy,    arch: amd64 }
-                    - { image: 'ubuntu:jammy',    distro: jammy,    arch: arm64 }
-                    - { image: 'ubuntu:noble',    distro: noble,    arch: amd64 }
-                    - { image: 'ubuntu:noble',    distro: noble,    arch: arm64 }
-                    - { image: 'debian:bullseye', distro: bullseye, arch: amd64 }
-                    - { image: 'debian:bullseye', distro: bullseye, arch: arm64 }
-                    - { image: 'debian:bookworm', distro: bookworm, arch: amd64 }
-                    - { image: 'debian:bookworm', distro: bookworm, arch: arm64 }
-                    - { image: 'debian:trixie',   distro: trixie,   arch: amd64 }
-                    - { image: 'debian:trixie',   distro: trixie,   arch: arm64 }
+                    - { image: 'ubuntu:jammy',    distro: jammy    }
+                    - { image: 'ubuntu:noble',    distro: noble    }
+                    - { image: 'debian:bullseye', distro: bullseye }
+                    - { image: 'debian:bookworm', distro: bookworm }
+                    - { image: 'debian:trixie',   distro: trixie   }
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
-            KB_TAG: ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+            KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -604,11 +759,6 @@ jobs:
               id: vars
               run: |
                   set -euo pipefail
-                  case "${{ matrix.arch }}" in
-                      amd64) tarball_arch=x86_64 ;;
-                      arm64) tarball_arch=arm64  ;;
-                  esac
-                  echo "tarball-arch=${tarball_arch}"        >> "$GITHUB_OUTPUT"
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Download validated kb.db
@@ -616,30 +766,6 @@ jobs:
               with:
                   name: kb-db-validated
                   path: pkg/kb.db.cached/
-
-            - name: Download binary tarball for this arch
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  name: release-artifacts-${{ matrix.arch }}
-                  path: pkg/binary.cached/
-
-            - name: Filter binary cache to current-tag linux tarball
-              env:
-                  TARBALL_ARCH: ${{ steps.vars.outputs.tarball-arch }}
-              run: |
-                  set -euo pipefail
-                  pattern="pgedge-ai-kb-builder_*_linux_${TARBALL_ARCH}.tar.gz"
-                  find pkg/binary.cached/ -mindepth 1 -type f ! -name "${pattern}" -delete
-                  shopt -s nullglob
-                  matches=(pkg/binary.cached/${pattern})
-                  shopt -u nullglob
-                  if [ "${#matches[@]}" -ne 1 ]; then
-                      echo "::error::Expected exactly one tarball matching ${pattern}, found ${#matches[@]}"
-                      ls -la pkg/binary.cached/
-                      exit 1
-                  fi
-                  echo "Staged binary tarball:"
-                  ls -la pkg/binary.cached/
 
             - name: Checkout pgEdge action repos
               env:
@@ -657,7 +783,7 @@ jobs:
               uses: ./.github/actions/pgedge-builder-action
               with:
                   image: ${{ matrix.image }}
-                  arch: ${{ matrix.arch }}
+                  arch: amd64
                   component_name: pkg
                   component_version: ${{ env.COMPONENT_VERSION }}
                   component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
@@ -669,8 +795,8 @@ jobs:
             - name: Upload DEB cell artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: deb__${{ matrix.distro }}__${{ matrix.arch }}
-                  path: output/${{ matrix.distro }}-${{ matrix.arch }}/
+                  name: deb__${{ matrix.distro }}
+                  path: output/${{ matrix.distro }}-amd64/
                   retention-days: 7
 
     push-apt:
@@ -697,32 +823,13 @@ jobs:
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_NAME: ${{ github.event.repository.name }}
         steps:
-            - name: Free disk space
-              # 10 DEB cell artifacts × ~1GB each saturate the runner's
-              # ~14GB default free space. Strip pre-installed toolchains
-              # we don't need.
-              run: |
-                  set -eu
-                  echo "Before cleanup:"
-                  df -h /
-                  sudo rm -rf \
-                      /usr/share/dotnet \
-                      /usr/local/lib/android \
-                      /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL \
-                      /usr/local/share/boost \
-                      /usr/local/lib/node_modules
-                  sudo apt-get clean
-                  echo "After cleanup:"
-                  df -h /
-
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
             - name: Download all DEB cell artifacts
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
-                  pattern: deb__*__*
+                  pattern: deb__*
                   path: deb-artifacts
                   merge-multiple: false
 
@@ -730,21 +837,16 @@ jobs:
               id: organize
               run: |
                   set -euo pipefail
-                  # mv (not cp) so we don't keep two copies of multi-GB
-                  # DEBs on the runner's small disk.
                   for distro in jammy noble bullseye bookworm trixie; do
                       mkdir -p "debs-${distro}"
-                      shopt -s nullglob
-                      for src_dir in deb-artifacts/deb__${distro}__*; do
-                          [ -d "${src_dir}" ] || continue
+                      src_dir="deb-artifacts/deb__${distro}"
+                      if [ -d "${src_dir}" ]; then
                           find "${src_dir}" -type f -name '*.deb' -exec mv -v {} "debs-${distro}/" \;
-                      done
-                      shopt -u nullglob
+                      fi
                       count=$(find "debs-${distro}" -maxdepth 1 -name '*.deb' | wc -l)
                       echo "${distro}: ${count} DEBs"
                   done
                   rm -rf deb-artifacts
-                  df -h /
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Checkout pgEdge action repos @multi-target
@@ -826,7 +928,7 @@ jobs:
 
     publish-manifest:
         name: Publish aggregated backup manifest
-        needs: [determine-repo-type, push-dnf, push-apt]
+        needs: [determine-repo-type, validate-kb-db, push-dnf, push-apt]
         if: always() && needs.determine-repo-type.result == 'success'
         runs-on: ubuntu-latest
         env:
@@ -844,7 +946,7 @@ jobs:
                   REPO_TYPE:        ${{ needs.determine-repo-type.outputs.repo-type }}
                   CV:               ${{ needs.determine-repo-type.outputs.component-version }}
                   CBN:              ${{ needs.determine-repo-type.outputs.component-buildnum }}
-                  KB_TAG:           ${{ needs.determine-repo-type.outputs.kb-db-release-tag }}
+                  KB_TAG:           ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
                   EFFECTIVE_TAG:    ${{ needs.determine-repo-type.outputs.effective-tag }}
                   SIMULATED:        ${{ needs.determine-repo-type.outputs.simulated }}
                   PUSH_DNF_RESULT:  ${{ needs.push-dnf.result }}

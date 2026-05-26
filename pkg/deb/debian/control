@@ -1,4 +1,4 @@
-Source: pgedge-postgres-mcp-kb
+Source: pgedge-ai-kb
 Section: database
 Priority: optional
 Maintainer: Muhammad Aqeel <muhammad.aqeel@pgedge.com>
@@ -6,12 +6,12 @@ Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.1.3
 Homepage: https://github.com/pgEdge/pgedge-ai-kb
 
-Package: pgedge-postgres-mcp-kb
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: pgEdge PostgreSQL MCP Knowledge Base
- The pgEdge PostgreSQL MCP Knowledge Base bundles the kb-builder
- binary and a pre-built SQLite knowledgebase of PostgreSQL and pgEdge
- documentation. The pgEdge PostgreSQL MCP Server consumes the
- knowledgebase for semantic search; the kb-builder binary regenerates
- or extends it from configured documentation sources.
+Package: pgedge-ai-kb
+Architecture: all
+Depends: ${misc:Depends}
+Description: pgEdge AI Knowledgebase database
+ Pre-built SQLite knowledgebase of PostgreSQL and pgEdge documentation
+ with embeddings from one or more providers (OpenAI, Voyage, Ollama).
+ Consumed by the pgEdge PostgreSQL MCP Server and the pgEdge AI DBA
+ Workbench for semantic search. Regenerate or extend it with the
+ pgedge-ai-kb-builder binary distributed separately via GitHub Releases.

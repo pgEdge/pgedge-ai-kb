@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# RPM build for pgedge-postgres-mcp-kb.
+# RPM build for pgedge-ai-kb (data-only, noarch).
 #
 # Invoked by common/build.sh from pgedge-builder-action via
 #   prepare → build → post_build.
@@ -9,88 +9,60 @@
 
 set -euo pipefail
 
-RHEL="$(rpm --eval %rhel)"
-ARCH="$(uname -m)"
-if [ "$ARCH" = "aarch64" ]; then
-    ARCH="arm64"
-fi
-
-# Both source artifacts are staged into the container by the workflow before
-# pgedge-builder-action runs. Their mount paths follow
-# $GITHUB_WORKSPACE → /build.
+# kb.db is staged into the container by the workflow before
+# pgedge-builder-action runs. Its mount path follows
+# $GITHUB_WORKSPACE → /build, so pkg/kb.db.cached/ on the host
+# is /build/pkg/kb.db.cached/ in the container.
 #
-#   kb.db          — downloaded by the validate-kb-db job from the
-#                    KB_DB_RELEASE_TAG GitHub release, then uploaded as a
-#                    workflow artifact, then downloaded into each cell at
-#                    pkg/kb.db.cached/kb.db.
-#   binary tarball — produced earlier in the same workflow run by the
-#                    build-amd64 / build-arm64 GoReleaser jobs, downloaded
-#                    into each cell at pkg/binary.cached/<filename>.
-#
-# Neither is fetched from GitHub Releases at packaging time. The cells must
-# consume the artifacts the current commit just produced, not whatever
-# happens to be published.
+# This package doesn't ship the kb-builder binary or the example
+# config — those live elsewhere (GoReleaser tarballs and the
+# pgedge-postgres-mcp server package, respectively).
 KB_DB_HOST_PATH="${KB_DB_HOST_PATH:-/build/pkg/kb.db.cached/kb.db}"
-BINARY_TARBALL_DIR="${BINARY_TARBALL_DIR:-/build/pkg/binary.cached}"
 
 prepare() {
     setup_dnf_build_env
     dnf install -y jq sqlite
 
-    # Reconstruct goreleaser's .Version (= the tag minus leading 'v') from
-    # PGEDGE_KB_VERSION + PGEDGE_KB_BUILDNUM. For pre-release tags buildnum
-    # is "<pre>_<iter>" (e.g. beta1_1); strip the trailing "_<iter>" to
-    # recover "<pre>", then join with version. For GA, buildnum is just "1"
-    # and there is no pre-release suffix.
-    if [[ "${PGEDGE_KB_BUILDNUM}" == *_* ]]; then
-        export BUILDER_VERSION="${PGEDGE_KB_VERSION}-${PGEDGE_KB_BUILDNUM%_*}"
-    else
-        export BUILDER_VERSION="${PGEDGE_KB_VERSION}"
-    fi
-
-    local tarball="pgedge-ai-kb-builder_${BUILDER_VERSION}_linux_${ARCH}.tar.gz"
-    local tarball_path="${BINARY_TARBALL_DIR}/${tarball}"
-
-    if [ ! -f "${tarball_path}" ]; then
-        echo "::error::Binary tarball not found at ${tarball_path}"
-        ls -la "${BINARY_TARBALL_DIR}" 2>/dev/null || echo "  (missing)"
-        exit 1
-    fi
-    echo "Staged binary tarball: ${tarball}"
-
     if [ ! -f "${KB_DB_HOST_PATH}" ]; then
         echo "::error::kb.db not found at ${KB_DB_HOST_PATH}"
-        echo "validate-kb-db is expected to fetch it from ${KB_DB_RELEASE_TAG} before this cell runs."
+        echo "validate-kb-db is expected to stage it before this cell runs."
         exit 1
+    fi
+
+    # Read the kb release tag from the artifact's sidecar file. The
+    # generate-kb-db / discover-kb-db jobs write it alongside kb.db.
+    # Falls back to "unknown" if missing (kept resilient for local builds).
+    local release_tag_file
+    release_tag_file="$(dirname "${KB_DB_HOST_PATH}")/RELEASE_TAG"
+    if [ -f "${release_tag_file}" ]; then
+        export KB_DB_RELEASE_TAG="$(cat "${release_tag_file}")"
+        echo "kb.db release tag: ${KB_DB_RELEASE_TAG}"
+    else
+        echo "::warning::RELEASE_TAG file missing alongside kb.db"
     fi
 
     echo "Copying spec to ~/rpmbuild/SPECS/..."
-    cp "${COMPONENT_NAME}/rpm/pgedge-postgres-mcp-kb.spec" \
+    cp "${COMPONENT_NAME}/rpm/pgedge-ai-kb.spec" \
         ~/rpmbuild/SPECS/
 
     echo "Staging sources..."
-    cp "${tarball_path}" ~/rpmbuild/SOURCES/
     cp "${KB_DB_HOST_PATH}" ~/rpmbuild/SOURCES/kb.db
-    cp "${COMPONENT_NAME}/common/pgedge-ai-kb-builder.yaml" \
-        ~/rpmbuild/SOURCES/
+    cp LICENSE.md ~/rpmbuild/SOURCES/
+    cp README.md ~/rpmbuild/SOURCES/
 
     echo "Installing build deps from spec..."
     dnf builddep -y \
         --define "pgedge_kb_version ${PGEDGE_KB_VERSION}" \
         --define "pgedge_kb_buildnum ${PGEDGE_KB_BUILDNUM}" \
-        --define "builder_version ${BUILDER_VERSION}" \
-        --define "arch ${ARCH}" \
-        ~/rpmbuild/SPECS/pgedge-postgres-mcp-kb.spec
+        ~/rpmbuild/SPECS/pgedge-ai-kb.spec
 }
 
 build() {
     echo "Building RPM and SRPM..."
     QA_RPATHS=$(( 0xffff )) rpmbuild -ba \
-        ~/rpmbuild/SPECS/pgedge-postgres-mcp-kb.spec \
+        ~/rpmbuild/SPECS/pgedge-ai-kb.spec \
         --define "pgedge_kb_version ${PGEDGE_KB_VERSION}" \
-        --define "pgedge_kb_buildnum ${PGEDGE_KB_BUILDNUM}" \
-        --define "builder_version ${BUILDER_VERSION}" \
-        --define "arch ${ARCH}"
+        --define "pgedge_kb_buildnum ${PGEDGE_KB_BUILDNUM}"
 }
 
 post_build() {

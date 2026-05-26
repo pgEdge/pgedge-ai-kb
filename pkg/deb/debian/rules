@@ -7,57 +7,41 @@ override_dh_builddeb:
 	dh_builddeb -- -Zgzip
 
 override_dh_auto_install:
-	# --- SBOM generation and signing ---
+	# --- SBOM for the kb.db file ---
 	mkdir -p debian/tmp/sbom
-	syft dir:$(CURDIR)/builder -o cyclonedx-json \
-		> debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json || exit 1
 	syft file:$(CURDIR)/kb.db -o cyclonedx-json \
-		> debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json || exit 1
+		> debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
 	KEY_ID=$$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $$5}' | head -n 1); export KEY_ID; \
 	gpg --armor --detach-sign --default-key "$$KEY_ID" \
-		--output debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json.asc \
-		debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json || exit 1; \
-	gpg --armor --detach-sign --default-key "$$KEY_ID" \
-		--output debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json.asc \
-		debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json || exit 1
-
-	# --- Binary (renamed at install time to /usr/bin/kb-builder) ---
-	install -D -m 755 builder/pgedge-ai-kb-builder \
-		debian/pgedge-postgres-mcp-kb/usr/bin/kb-builder
+		--output debian/tmp/sbom/pgedge-ai-kb-sbom.json.asc \
+		debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
 
 	# --- Knowledge base database ---
+	# Path is stable so the pgedge-postgres-mcp server's default config
+	# keeps working after the package rename.
 	install -D -m 644 kb.db \
-		debian/pgedge-postgres-mcp-kb/usr/share/pgedge/postgres-mcp-kb/kb.db
-
-	# --- Example config ---
-	install -D -m 644 debian/pgedge-ai-kb-builder.yaml \
-		debian/pgedge-postgres-mcp-kb/etc/pgedge/pgedge-ai-kb-builder.yaml
+		debian/pgedge-ai-kb/usr/share/pgedge/postgres-mcp-kb/kb.db
 
 	# --- Documentation ---
-	install -D -m 644 builder/LICENSE.md \
-		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/LICENSE.md
-	install -D -m 644 builder/README.md \
-		debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/README.md
+	install -D -m 644 LICENSE.md \
+		debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/LICENSE.md
+	install -D -m 644 README.md \
+		debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/README.md
 
 	# VERSION metadata — env vars come from build-deb.sh / common.sh.
-	install -d debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb
+	install -d debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb
 	{ \
-		echo "PGEDGE_POSTGRES_MCP_KB_VERSION=$${PGEDGE_KB_VERSION}-$${PGEDGE_KB_BUILDNUM}"; \
-		echo "BUILDER_VERSION=$${BUILDER_VERSION}"; \
+		echo "PGEDGE_AI_KB_VERSION=$${PGEDGE_KB_VERSION}-$${PGEDGE_KB_BUILDNUM}"; \
 		echo "KB_DB_RELEASE_TAG=$${KB_DB_RELEASE_TAG:-unknown}"; \
 		echo "BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 		echo "BUILD_COMMIT=$${GITHUB_SHA:-unknown}"; \
 		echo "REPO_TYPE=$${REPO_TYPE:-unknown}"; \
-	} > debian/pgedge-postgres-mcp-kb/usr/share/doc/pgedge-postgres-mcp-kb/VERSION
+	} > debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/VERSION
 
-	# --- SBOMs ---
-	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json \
-		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-sbom.json
-	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-sbom.json.asc \
-		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-sbom.json.asc
-	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json \
-		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-db-sbom.json
-	install -D -m 644 debian/tmp/sbom/pgedge-postgres-mcp-kb-db-sbom.json.asc \
-		debian/pgedge-postgres-mcp-kb/usr/share/pgedge-postgres-mcp-kb-db-sbom.json.asc
+	# --- SBOM install ---
+	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-sbom.json \
+		debian/pgedge-ai-kb/usr/share/pgedge-ai-kb-sbom.json
+	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-sbom.json.asc \
+		debian/pgedge-ai-kb/usr/share/pgedge-ai-kb-sbom.json.asc
 
 	rm -rf debian/tmp/sbom
