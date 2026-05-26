@@ -541,6 +541,7 @@ func (d *Database) UpdateGeminiEmbeddings(chunks []*kbtypes.Chunk) error {
 		return err
 	}
 	defer func() {
+		// Rollback is safe to ignore here as it will be a no-op if commit succeeds
 		_ = tx.Rollback() //nolint:errcheck // rollback error is not actionable
 	}()
 
