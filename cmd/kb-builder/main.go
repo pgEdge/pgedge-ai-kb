@@ -441,6 +441,7 @@ func processFile(filePath string, source kbsource.SourceInfo, db *kbdatabase.Dat
 				OpenAIEmbedding:    existingChunk.OpenAIEmbedding,
 				VoyageEmbedding:    existingChunk.VoyageEmbedding,
 				OllamaEmbedding:    existingChunk.OllamaEmbedding,
+				GeminiEmbedding:    existingChunk.GeminiEmbedding,
 			}
 			chunks = append(chunks, chunk)
 		}
