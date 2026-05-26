@@ -123,7 +123,14 @@ jobs:
         # Wait for the kb.db pipeline too so the GH release can include it
         # as a downloadable asset alongside the binary tarballs.
         needs: [build-amd64, build-arm64, validate-kb-db]
-        if: github.ref_type == 'tag'
+        # always() + explicit needs check is required because validate-kb-db
+        # has an OR'd dependency chain; the default success() check would
+        # mistakenly propagate the SKIPPED status from the unused branch.
+        if: |
+            always() && github.ref_type == 'tag' &&
+            needs.build-amd64.result == 'success' &&
+            needs.build-arm64.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -548,6 +555,14 @@ jobs:
     package-rpm:
         name: Package RPM (${{ matrix.image }} noarch)
         needs: [determine-repo-type, validate-kb-db]
+        # always() + explicit needs check is required because validate-kb-db
+        # has an OR'd dependency (generate-kb-db || discover-kb-db) and the
+        # default success() check would mistakenly propagate the SKIPPED
+        # status from the unused branch into our gating decision.
+        if: |
+            always() &&
+            needs.determine-repo-type.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
         runs-on: ubuntu-latest
         # Package is noarch (data-only kb.db). One cell per EL major; built
         # on amd64 runner since the resulting RPM is arch-independent.
@@ -734,6 +749,11 @@ jobs:
     package-deb:
         name: Package DEB (${{ matrix.image }} all)
         needs: [determine-repo-type, validate-kb-db]
+        # See package-rpm for why always() + explicit needs check is needed.
+        if: |
+            always() &&
+            needs.determine-repo-type.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
         runs-on: ubuntu-latest
         # Package is Architecture: all (data-only kb.db). One cell per distro;
         # built on amd64 runner since the resulting DEB is arch-independent.
