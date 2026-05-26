@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/pgEdge/pgedge-go-llm-lib/llm"
+	_ "github.com/pgEdge/pgedge-go-llm-lib/llm/provider/gemini"
 	_ "github.com/pgEdge/pgedge-go-llm-lib/llm/provider/openai"
 
 	"github.com/pgEdge/pgedge-ai-kb/internal/kbconfig"
@@ -59,6 +60,40 @@ func mustOpenAIClientWithBaseURL(t *testing.T, baseURL string) llm.Client {
 	c, err := llm.NewClient("openai", llm.Options{
 		APIKey:  "test-key",
 		Model:   "text-embedding-3-small",
+		BaseURL: baseURL,
+	})
+	if err != nil {
+		t.Fatalf("llm.NewClient: %v", err)
+	}
+	return c
+}
+
+// geminiMockServer returns an httptest.Server that mimics the Gemini
+// embedContent endpoint. The lib makes one HTTP call per text in a
+// batch, so the server returns a single embedding per request.
+func geminiMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter, r *http.Request,
+	) {
+		out := struct {
+			Embedding struct {
+				Values []float64 `json:"values"`
+			} `json:"embedding"`
+		}{}
+		out.Embedding.Values = []float64{0.1, 0.2, 0.3}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+}
+
+// mustGeminiClientWithBaseURL builds a Gemini llm.Client whose
+// requests are routed to baseURL (the test server).
+func mustGeminiClientWithBaseURL(t *testing.T, baseURL string) llm.Client {
+	t.Helper()
+	c, err := llm.NewClient("gemini", llm.Options{
+		APIKey:  "test-key",
+		Model:   "gemini-embedding-001",
 		BaseURL: baseURL,
 	})
 	if err != nil {
@@ -137,6 +172,44 @@ func TestGenerateEmbeddings_OpenAI_EndToEnd(t *testing.T) {
 		if len(ch.OpenAIEmbedding) != 3 {
 			t.Errorf("chunk %d: OpenAIEmbedding len = %d, want 3",
 				i, len(ch.OpenAIEmbedding))
+		}
+	}
+}
+
+// TestGenerateEmbeddings_Gemini_EndToEnd exercises the full code path
+// (client construction → EmbedBatch → []float32 assignment) against an
+// httptest.Server pretending to be Gemini.
+func TestGenerateEmbeddings_Gemini_EndToEnd(t *testing.T) {
+	srv := geminiMockServer(t)
+	defer srv.Close()
+
+	cfg := &kbconfig.Config{
+		Embeddings: kbconfig.EmbeddingConfig{
+			Gemini: kbconfig.GeminiConfig{
+				Enabled: true,
+				APIKey:  "test-key",
+				Model:   "gemini-embedding-001",
+			},
+		},
+	}
+	eg, err := NewEmbeddingGenerator(cfg, nil, -1)
+	if err != nil {
+		t.Fatalf("NewEmbeddingGenerator: %v", err)
+	}
+	// Replace the Gemini client with one pointed at the mock server.
+	eg.clients["gemini"] = mustGeminiClientWithBaseURL(t, srv.URL)
+
+	chunks := []*kbtypes.Chunk{
+		{Text: "hello", ProjectName: "P", ProjectVersion: "1"},
+		{Text: "world", ProjectName: "P", ProjectVersion: "1"},
+	}
+	if errs := eg.GenerateEmbeddings(chunks); len(errs) != 0 {
+		t.Fatalf("GenerateEmbeddings errors: %v", errs)
+	}
+	for i, ch := range chunks {
+		if len(ch.GeminiEmbedding) != 3 {
+			t.Errorf("chunk %d: GeminiEmbedding len = %d, want 3",
+				i, len(ch.GeminiEmbedding))
 		}
 	}
 }
