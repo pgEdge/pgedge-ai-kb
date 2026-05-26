@@ -11,7 +11,9 @@
 package kbdatabase
 
 import (
+	"database/sql"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/pgEdge/pgedge-ai-kb/internal/kbtypes"
@@ -284,4 +286,102 @@ func TestTransactionRollback(t *testing.T) {
 	// This test is mainly to ensure the transaction mechanism is in place
 	// In a real scenario with mock errors, this would test rollback
 	_, _ = initialCount, finalCount // Suppress unused variable warnings
+}
+
+func TestGeminiEmbeddingRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	want := []float32{0.11, 0.22, 0.33, 0.44}
+	chunk := &kbtypes.Chunk{
+		Text:            "hello gemini",
+		ProjectName:     "P",
+		ProjectVersion:  "1",
+		GeminiEmbedding: want,
+	}
+	if err := db.InsertChunks([]*kbtypes.Chunk{chunk}); err != nil {
+		t.Fatalf("InsertChunks: %v", err)
+	}
+
+	got, err := db.GetAllChunks()
+	if err != nil {
+		t.Fatalf("GetAllChunks: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 chunk, got %d", len(got))
+	}
+	if len(got[0].GeminiEmbedding) != len(want) {
+		t.Fatalf("GeminiEmbedding length %d, want %d",
+			len(got[0].GeminiEmbedding), len(want))
+	}
+	for i, v := range want {
+		if got[0].GeminiEmbedding[i] != v {
+			t.Errorf("GeminiEmbedding[%d] = %v, want %v",
+				i, got[0].GeminiEmbedding[i], v)
+		}
+	}
+}
+
+func TestMigrateAddGeminiColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "old.db")
+
+	// Build a database manually with the old schema (no gemini_embedding column).
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE chunks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			text TEXT NOT NULL,
+			title TEXT,
+			section TEXT,
+			project_name TEXT NOT NULL,
+			project_version TEXT NOT NULL,
+			file_path TEXT,
+			source_file_checksum TEXT,
+			openai_embedding BLOB,
+			voyage_embedding BLOB,
+			ollama_embedding BLOB,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	// Open via the package; this should run migrateSchema and add the column.
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	// Verify the column now exists.
+	cols, err := db.columnSet("chunks")
+	if err != nil {
+		t.Fatalf("columnSet: %v", err)
+	}
+	if !cols["gemini_embedding"] {
+		t.Error("gemini_embedding column was not added by migration")
+	}
+
+	// Round-trip a chunk with a Gemini embedding to confirm the column is usable.
+	if err := db.InsertChunks([]*kbtypes.Chunk{{
+		Text:            "x",
+		ProjectName:     "P",
+		ProjectVersion:  "1",
+		GeminiEmbedding: []float32{1, 2, 3},
+	}}); err != nil {
+		t.Fatalf("InsertChunks after migration: %v", err)
+	}
 }
