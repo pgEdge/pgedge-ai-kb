@@ -104,6 +104,22 @@ func TestValidateConfig(t *testing.T) {
 			shouldError: false,
 		},
 		{
+			name: "valid config with only gemini",
+			config: &Config{
+				Sources: []DocumentSource{
+					{
+						LocalPath:      "/tmp/test",
+						ProjectName:    "Test",
+						ProjectVersion: "1.0",
+					},
+				},
+				Embeddings: EmbeddingConfig{
+					Gemini: GeminiConfig{Enabled: true},
+				},
+			},
+			shouldError: false,
+		},
+		{
 			name: "no sources",
 			config: &Config{
 				Sources: []DocumentSource{},
@@ -245,6 +261,7 @@ func TestApplyDefaults(t *testing.T) {
 			OpenAI: OpenAIConfig{Enabled: true},
 			Voyage: VoyageConfig{Enabled: true},
 			Ollama: OllamaConfig{Enabled: true},
+			Gemini: GeminiConfig{Enabled: true},
 		},
 	}
 
@@ -280,5 +297,14 @@ func TestApplyDefaults(t *testing.T) {
 
 	if cfg.Embeddings.Ollama.Endpoint == "" {
 		t.Error("Ollama endpoint should have default")
+	}
+
+	if cfg.Embeddings.Gemini.Model != "gemini-embedding-001" {
+		t.Errorf("Gemini.Model = %q, want gemini-embedding-001",
+			cfg.Embeddings.Gemini.Model)
+	}
+
+	if cfg.Embeddings.Gemini.APIKeyFile == "" {
+		t.Error("Gemini.APIKeyFile should have default")
 	}
 }
