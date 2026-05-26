@@ -41,8 +41,9 @@ type EmbeddingGenerator struct {
 
 // NewEmbeddingGenerator creates a new embedding generator. maxRetries
 // controls how many times the underlying lib retries transient API
-// errors: pass -1 to use the lib default, 0 for "effectively unlimited"
-// (translated to a very large finite cap), or any positive integer.
+// errors: pass -1 to use the kb-builder default (5 retries, 1s..60s
+// backoff), 0 for "effectively unlimited" (translated to a very large
+// finite cap), or any positive integer.
 func NewEmbeddingGenerator(
 	config *kbconfig.Config,
 	db *kbdatabase.Database,
