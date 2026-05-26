@@ -153,7 +153,10 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Generate embeddings
 	fmt.Println("\n=== Generating Embeddings ===")
-	embedGen := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	if err != nil {
+		return fmt.Errorf("failed to initialize embedding generator: %w", err)
+	}
 	embeddingErrors := embedGen.GenerateEmbeddings(allChunks)
 
 	// Report any embedding failures
@@ -241,7 +244,10 @@ func runAddMissingEmbeddings(config *kbconfig.Config) error {
 
 	// Generate missing embeddings
 	fmt.Println("\n=== Generating Missing Embeddings ===")
-	embedGen := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	if err != nil {
+		return fmt.Errorf("failed to initialize embedding generator: %w", err)
+	}
 	embeddingErrors := embedGen.GenerateEmbeddings(chunksNeedingEmbeddings)
 
 	// Report any failures
