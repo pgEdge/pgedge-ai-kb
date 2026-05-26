@@ -41,6 +41,13 @@ func Open(path string) (*Database, error) {
 		return nil, fmt.Errorf("failed to create schema: %w", err)
 	}
 
+	// Apply any idempotent migrations to bring older databases up to
+	// the current schema.
+	if err := d.migrateSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate schema: %w", err)
+	}
+
 	return d, nil
 }
 
@@ -95,6 +102,52 @@ func (d *Database) createSchema() error {
 
 	_, err := d.db.Exec(schema)
 	return err
+}
+
+// migrateSchema applies idempotent schema changes to bring older
+// databases in line with the current schema. Safe to run on every
+// open.
+func (d *Database) migrateSchema() error {
+	cols, err := d.columnSet("chunks")
+	if err != nil {
+		return fmt.Errorf("failed to inspect chunks table: %w", err)
+	}
+	if !cols["gemini_embedding"] {
+		if _, err := d.db.Exec(
+			`ALTER TABLE chunks ADD COLUMN gemini_embedding BLOB`,
+		); err != nil {
+			return fmt.Errorf(
+				"failed to add gemini_embedding column: %w", err)
+		}
+	}
+	return nil
+}
+
+// columnSet returns the set of column names for the given table.
+func (d *Database) columnSet(table string) (map[string]bool, error) {
+	rows, err := d.db.Query(
+		fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var (
+			cid          int
+			name, typ    string
+			notNull, pk  int
+			dfltValueRaw any
+		)
+		if err := rows.Scan(
+			&cid, &name, &typ, &notNull, &dfltValueRaw, &pk,
+		); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
 }
 
 // InsertChunks inserts chunks into the database and records source file metadata
