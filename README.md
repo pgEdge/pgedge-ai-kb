@@ -31,8 +31,8 @@ pgEdge AI DBA Workbench.
 
 The builder converts content from multiple formats (Markdown, HTML,
 reStructuredText, SGML, DocBook XML), chunks documents intelligently,
-generates embeddings using OpenAI, Voyage AI, or Ollama, and stores
-everything in an optimized SQLite database.
+generates embeddings using OpenAI, Voyage AI, Ollama, or Gemini, and
+stores everything in an optimized SQLite database.
 
 ## Quick Start
 
@@ -60,7 +60,7 @@ downstream consumers load for semantic search.
 - **Intelligent chunking** - Heading-aware splitting that preserves
   document structure for retrieval quality.
 - **Multiple embedding providers** - Generate embeddings with OpenAI,
-  Voyage AI, or Ollama (local); enable any subset.
+  Voyage AI, Ollama (local), or Gemini; enable any subset.
 - **Incremental builds** - SHA256 checksums skip unchanged files and
   reuse existing chunks across versions.
 - **Resilient API calls** - Configurable retries with exponential

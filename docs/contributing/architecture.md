@@ -60,6 +60,7 @@ The builder is a single Go binary that performs the following work:
 │  │  • OpenAI API (batch processing)                   │    │
 │  │  • Voyage AI API (batch processing)                │    │
 │  │  • Ollama (sequential processing)                  │    │
+│  │  • Gemini API (batch processing)                   │    │
 │  └─────────────────────────┬──────────────────────────┘    │
 │                            │                               │
 │  ┌─────────────────────────▼──────────────────────────┐    │
@@ -198,14 +199,18 @@ The hard limits keep chunks compatible with Ollama models such as
 The `internal/kbembed` package generates embeddings from one or more
 providers. The package supports:
 
-- OpenAI, which calls `https://api.openai.com/v1/embeddings` in
-  batches of up to 100 texts per request.
+- OpenAI, which processes batches of up to 100 texts per request.
 
-- Voyage AI, which calls `https://api.voyageai.com/v1/embeddings` in
-  batches of up to 100 texts per request.
+- Voyage AI, which processes batches of up to 100 texts per request.
 
-- Ollama, which calls `<endpoint>/api/embeddings` one text at a
-  time.
+- Ollama, which processes one text at a time.
+
+- Gemini, which processes batches of up to 100 texts per request.
+
+HTTP transport, authentication headers, and exponential-backoff
+retries for all providers are delegated to the
+`pgedge-go-llm-lib` library; `kbembed` assembles provider-specific
+request bodies and decodes the responses.
 
 The package retries transient API errors with exponential backoff
 capped at 60 seconds; the `--max-retries` flag controls the budget.
@@ -260,6 +265,7 @@ type Chunk struct {
     OpenAIEmbedding      []float32
     VoyageEmbedding      []float32
     OllamaEmbedding      []float32
+    GeminiEmbedding      []float32
 }
 ```
 
