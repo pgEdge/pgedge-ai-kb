@@ -1,6 +1,6 @@
 module github.com/pgEdge/pgedge-ai-kb
 
-go 1.25.8
+go 1.26.1
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
@@ -17,6 +17,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/pgEdge/pgedge-go-llm-lib v0.0.0-20260526160600-562a41cf60c9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
