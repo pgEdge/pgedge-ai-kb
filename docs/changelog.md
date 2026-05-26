@@ -45,6 +45,12 @@
   cleaned up so the new project's CI runs `golangci-lint run` on the
   whole codebase without exclusions.
 
+- When an embedding batch fails, the error now identifies the batch
+  range (e.g., "OpenAI embed batch 1-100") rather than the specific
+  failing chunk. The per-chunk diagnostic block from the previous
+  Ollama implementation is no longer available because the shared LLM
+  library returns one error per batch of inputs.
+
 ## Earlier history
 
 For release notes covering the period when this code lived inside
