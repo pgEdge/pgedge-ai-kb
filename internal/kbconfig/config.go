@@ -272,14 +272,6 @@ func loadAPIKeys(config *Config) error {
 		config.Embeddings.Voyage.APIKey = key
 	}
 
-	if config.Embeddings.Gemini.Enabled {
-		key, err := readAPIKey(config.Embeddings.Gemini.APIKeyFile)
-		if err != nil {
-			return fmt.Errorf("gemini API key: %w", err)
-		}
-		config.Embeddings.Gemini.APIKey = key
-	}
-
 	// Ollama API key is optional: only needed for Ollama Cloud, not
 	// for local Ollama deployments.
 	if config.Embeddings.Ollama.Enabled && config.Embeddings.Ollama.APIKeyFile != "" {
@@ -288,6 +280,14 @@ func loadAPIKeys(config *Config) error {
 			return fmt.Errorf("ollama API key: %w", err)
 		}
 		config.Embeddings.Ollama.APIKey = key
+	}
+
+	if config.Embeddings.Gemini.Enabled {
+		key, err := readAPIKey(config.Embeddings.Gemini.APIKeyFile)
+		if err != nil {
+			return fmt.Errorf("gemini API key: %w", err)
+		}
+		config.Embeddings.Gemini.APIKey = key
 	}
 
 	return nil
