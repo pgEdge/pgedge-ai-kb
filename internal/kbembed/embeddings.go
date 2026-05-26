@@ -34,7 +34,6 @@ const (
 // this type owns only chunk filtering, batching, []float32 conversion,
 // and DB persistence.
 type EmbeddingGenerator struct {
-	config  *kbconfig.Config
 	clients map[string]llm.Client
 	db      *kbdatabase.Database
 	dbMux   sync.Mutex
@@ -81,7 +80,6 @@ func NewEmbeddingGenerator(
 	}
 
 	return &EmbeddingGenerator{
-		config:  config,
 		clients: clients,
 		db:      db,
 	}, nil
@@ -157,7 +155,7 @@ func (eg *EmbeddingGenerator) GenerateEmbeddings(
 			defer wg.Done()
 			fmt.Printf("Starting %s embeddings...\n", spec.label)
 			providerStart := time.Now()
-			if err := eg.runProvider(context.Background(), name, client, spec, chunks); err != nil {
+			if err := eg.runProvider(context.Background(), client, spec, chunks); err != nil {
 				fmt.Printf("⚠️  %s embeddings failed: %v\n", spec.label, err)
 				resultChan <- providerResult{name, err}
 				return
@@ -187,7 +185,6 @@ func (eg *EmbeddingGenerator) GenerateEmbeddings(
 // that still need them, in batches.
 func (eg *EmbeddingGenerator) runProvider(
 	ctx context.Context,
-	name string,
 	client llm.Client,
 	spec providerSpec,
 	chunks []*kbtypes.Chunk,
