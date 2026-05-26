@@ -9,6 +9,8 @@
 
 set -euo pipefail
 
+RHEL="$(rpm --eval %rhel)"
+
 # kb.db is staged into the container by the workflow before
 # pgedge-builder-action runs. Its mount path follows
 # $GITHUB_WORKSPACE → /build, so pkg/kb.db.cached/ on the host
