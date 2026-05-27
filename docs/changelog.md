@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- The pgEdge AI Knowledgebase Builder now supports Gemini as a fourth
+  embedding provider; the default model is `gemini-embedding-001`.
+  Configure it under the `embeddings.gemini` block in the YAML
+  configuration file.
+
+- The embedding HTTP and retry logic has migrated to the shared
+  `github.com/pgEdge/pgedge-go-llm-lib` library. This consolidates
+  request handling, retry/backoff, and Ollama context-overflow
+  truncation into one place across pgEdge tooling.
+
+- The `--max-retries 0` flag previously meant "retry indefinitely";
+  it now maps to a very large finite cap. Practical behaviour for
+  users is unchanged.
+
+- Existing databases gain a new `gemini_embedding` BLOB column on
+  first open via an idempotent `ALTER TABLE`. Old rows have NULL in
+  this column until the next build runs with Gemini enabled.
+
+- The minimum required Go toolchain has bumped to 1.26.1 to match
+  the shared LLM library.
+
 - The pgEdge AI Knowledgebase Builder is extracted from the pgEdge
   Postgres MCP Server into a standalone project. The Go module is
   `github.com/pgEdge/pgedge-ai-kb` and the binary is renamed from
@@ -23,6 +44,12 @@
   error strings, tagged-switch suggestion, De Morgan transform) are
   cleaned up so the new project's CI runs `golangci-lint run` on the
   whole codebase without exclusions.
+
+- When an embedding batch fails, the error now identifies the batch
+  range (e.g., "OpenAI embed batch 1-100") rather than the specific
+  failing chunk. The per-chunk diagnostic block from the previous
+  Ollama implementation is no longer available because the shared LLM
+  library returns one error per batch of inputs.
 
 ## Earlier history
 

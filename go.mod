@@ -1,10 +1,11 @@
 module github.com/pgEdge/pgedge-ai-kb
 
-go 1.25.8
+go 1.26.1
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/PuerkitoBio/goquery v1.9.3
+	github.com/pgEdge/pgedge-go-llm-lib v0.0.0-20260527091055-23f6ef29ba95
 	github.com/spf13/cobra v1.10.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.40.1

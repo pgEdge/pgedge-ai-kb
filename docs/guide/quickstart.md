@@ -41,8 +41,9 @@ echo "sk-your-openai-key" > ~/.openai-api-key
 chmod 600 ~/.openai-api-key
 ```
 
-Voyage AI and Ollama follow the same file-based key pattern; see
-[Configuring Embedding Providers](embeddings.md) for details.
+Voyage AI, Ollama, and Gemini follow the same file-based key
+pattern; see [Configuring Embedding Providers](embeddings.md) for
+details.
 
 ## Write a Minimal Configuration
 
@@ -72,6 +73,9 @@ embeddings:
         enabled: false
 
     ollama:
+        enabled: false
+
+    gemini:
         enabled: false
 ```
 

@@ -34,6 +34,7 @@ CREATE TABLE chunks (
     openai_embedding BLOB,
     voyage_embedding BLOB,
     ollama_embedding BLOB,
+    gemini_embedding BLOB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -57,10 +58,12 @@ The columns serve the following purposes:
   file; the builder uses it for incremental rebuilds and cross-version
   deduplication.
 
-- The `openai_embedding`, `voyage_embedding`, and `ollama_embedding`
-  columns hold serialised float32 vectors as little-endian BLOBs.
-  Each column is populated only when the corresponding provider was
-  enabled at build time.
+- The `openai_embedding`, `voyage_embedding`, `ollama_embedding`, and
+  `gemini_embedding` columns hold serialised float32 vectors as
+  little-endian BLOBs. Each column is populated only when the
+  corresponding provider was enabled at build time. The
+  `gemini_embedding` column is added to existing databases via an
+  idempotent `ALTER TABLE` on first open.
 
 - The `created_at` column records when the chunk was inserted.
 
@@ -95,8 +98,10 @@ values:
 
 The OpenAI `text-embedding-3-small` model produces 1536-dimensional
 vectors, so an `openai_embedding` BLOB is 6144 bytes. Voyage `voyage-3`
-produces 1024-dimensional vectors (4096 bytes), and Ollama
-`nomic-embed-text` produces 768-dimensional vectors (3072 bytes).
+produces 1024-dimensional vectors (4096 bytes). Ollama
+`nomic-embed-text` produces 768-dimensional vectors (3072 bytes). The
+Gemini `gemini-embedding-001` model produces 3072-dimensional vectors
+(12288 bytes).
 
 ## Querying Patterns
 

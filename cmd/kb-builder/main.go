@@ -46,7 +46,7 @@ embeddings for use with retrieval-augmented AI tools.
 
 The tool converts documents from multiple formats (Markdown, HTML, RST, SGML),
 chunks them intelligently, generates embeddings using multiple providers (OpenAI,
-Voyage, Ollama), and stores everything in an optimized SQLite database.`,
+Voyage, Gemini, Ollama), and stores everything in an optimized SQLite database.`,
 	RunE: run,
 }
 
@@ -60,7 +60,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&addMissingEmbeddings, "add-missing-embeddings", false,
 		"Add missing embeddings to existing database instead of rebuilding")
 	rootCmd.Flags().StringVar(&clearEmbeddings, "clear-embeddings", "",
-		"Clear embeddings for specified provider (openai, voyage, or ollama)")
+		"Clear embeddings for specified provider (openai, voyage, ollama, or gemini)")
 	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 5,
 		"Maximum number of retries for transient embedding API errors (0 = unlimited)")
 }
@@ -123,6 +123,9 @@ func run(cmd *cobra.Command, args []string) error {
 	if config.Embeddings.Ollama.Enabled {
 		enabledProviders = append(enabledProviders, "Ollama")
 	}
+	if config.Embeddings.Gemini.Enabled {
+		enabledProviders = append(enabledProviders, "Gemini")
+	}
 	fmt.Printf("Enabled embedding providers: %v\n", enabledProviders)
 
 	// Open database early for checksum checking
@@ -151,9 +154,22 @@ func run(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\nTotal chunks created/reused: %d\n", len(allChunks))
 
+	// Insert chunks (without embeddings) into the database FIRST so that
+	// each chunk gets a row ID. The embedding generator then persists
+	// embeddings incrementally per batch, which means a ctrl-C mid-run
+	// leaves the database in a recoverable state — re-run with
+	// --add-missing-embeddings to backfill.
+	fmt.Println("\n=== Storing chunks in Database ===")
+	if err := db.InsertChunks(allChunks); err != nil {
+		return fmt.Errorf("failed to insert chunks: %w", err)
+	}
+
 	// Generate embeddings
 	fmt.Println("\n=== Generating Embeddings ===")
-	embedGen := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	if err != nil {
+		return fmt.Errorf("failed to initialize embedding generator: %w", err)
+	}
 	embeddingErrors := embedGen.GenerateEmbeddings(allChunks)
 
 	// Report any embedding failures
@@ -163,12 +179,6 @@ func run(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  - %s: %v\n", provider, err)
 		}
 		fmt.Println("\nContinuing with partial embeddings. Use --add-missing-embeddings later to complete them.")
-	}
-
-	// Store in database
-	fmt.Println("\n=== Storing in Database ===")
-	if err := db.InsertChunks(allChunks); err != nil {
-		return fmt.Errorf("failed to insert chunks: %w", err)
 	}
 
 	// Print stats
@@ -226,6 +236,9 @@ func runAddMissingEmbeddings(config *kbconfig.Config) error {
 		if config.Embeddings.Ollama.Enabled && len(chunk.OllamaEmbedding) == 0 {
 			needsEmbedding = true
 		}
+		if config.Embeddings.Gemini.Enabled && len(chunk.GeminiEmbedding) == 0 {
+			needsEmbedding = true
+		}
 
 		if needsEmbedding {
 			chunksNeedingEmbeddings = append(chunksNeedingEmbeddings, chunk)
@@ -241,7 +254,10 @@ func runAddMissingEmbeddings(config *kbconfig.Config) error {
 
 	// Generate missing embeddings
 	fmt.Println("\n=== Generating Missing Embeddings ===")
-	embedGen := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	if err != nil {
+		return fmt.Errorf("failed to initialize embedding generator: %w", err)
+	}
 	embeddingErrors := embedGen.GenerateEmbeddings(chunksNeedingEmbeddings)
 
 	// Report any failures
@@ -429,6 +445,7 @@ func processFile(filePath string, source kbsource.SourceInfo, db *kbdatabase.Dat
 				OpenAIEmbedding:    existingChunk.OpenAIEmbedding,
 				VoyageEmbedding:    existingChunk.VoyageEmbedding,
 				OllamaEmbedding:    existingChunk.OllamaEmbedding,
+				GeminiEmbedding:    existingChunk.GeminiEmbedding,
 			}
 			chunks = append(chunks, chunk)
 		}

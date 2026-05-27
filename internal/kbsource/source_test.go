@@ -214,7 +214,10 @@ func TestFetchSource_LocalVsGit(t *testing.T) {
 		t.Error("BasePath should not be empty for local source")
 	}
 
-	// Test git source (should fail without actual git repo)
+	// Test git source (should fail without actual git repo).
+	// GIT_TERMINAL_PROMPT=0 stops git from prompting for credentials
+	// when the bogus URL is interpreted as a potentially-private repo.
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 	gitSource := kbconfig.DocumentSource{
 		GitURL:         "https://github.com/test/test",
 		ProjectName:    "Test",

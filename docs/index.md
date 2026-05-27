@@ -22,8 +22,8 @@ The Knowledgebase Builder includes the following features:
 - The builder uses an intelligent heading-aware chunker that
   preserves structural elements such as code blocks, tables, and
   lists.
-- The builder generates embeddings with OpenAI, Voyage AI, or
-  Ollama; you can enable any one or any combination.
+- The builder generates embeddings with OpenAI, Voyage AI, Ollama,
+  or Gemini; you can enable any one or any combination.
 - The builder supports incremental rebuilds; SHA256 checksums
   detect unchanged files and reuse existing chunks across versions.
 - The builder retries transient embedding API errors with
@@ -74,7 +74,7 @@ For users who run the builder:
   Git and local documentation sources.
 
 - [Configuring Embedding Providers](guide/embeddings.md) describes
-  how to enable and tune OpenAI, Voyage AI, and Ollama.
+  how to enable and tune OpenAI, Voyage AI, Ollama, and Gemini.
 
 - [Output Database Layout](guide/output-db.md) documents the SQLite
   schema produced by the builder.

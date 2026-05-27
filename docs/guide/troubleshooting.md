@@ -14,15 +14,17 @@ leading `~` to the user's home directory.
 
 ### "at least one embedding provider must be enabled"
 
-The configuration disables all three providers. Set `enabled: true`
-under `embeddings.openai`, `embeddings.voyage`, or `embeddings.ollama`
-(or any combination).
+The configuration disables all four providers. Set `enabled: true`
+under `embeddings.openai`, `embeddings.voyage`, `embeddings.ollama`,
+or `embeddings.gemini` (or any combination).
 
-### "OpenAI API key file is empty" (or "Voyage")
+### "OpenAI API key file is empty" (or "Voyage", "Gemini")
 
 The configured `api_key_file` exists but contains no key (or only
 whitespace). Write the key with `echo "sk-..." > ~/.openai-api-key`
-followed by `chmod 600 ~/.openai-api-key`.
+followed by `chmod 600 ~/.openai-api-key`. Use the appropriate key
+file path for Voyage (`~/.voyage-api-key`) or Gemini
+(`~/.gemini-api-key`).
 
 ### "source N: must specify either git_url or local_path"
 

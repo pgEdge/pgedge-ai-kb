@@ -17,7 +17,7 @@ The builder supports the following flags:
 | `-d`, `--database` | Override the configured output database path. |
 | `--skip-updates` | Skip the `git pull` step for previously cloned sources. |
 | `--add-missing-embeddings` | Generate embeddings only for chunks missing them, instead of rebuilding. |
-| `--clear-embeddings <provider>` | Clear embeddings for `openai`, `voyage`, or `ollama`. |
+| `--clear-embeddings <provider>` | Clear embeddings for `openai`, `voyage`, `ollama`, or `gemini`. |
 | `--max-retries <n>` | Retry budget for transient embedding API errors. `0` retries indefinitely (default `5`). |
 | `-h`, `--help` | Print usage information. |
 
@@ -37,8 +37,8 @@ The configuration file accepts the following top-level keys:
   process; the [Configuring Sources](../guide/sources.md) guide
   describes the available fields.
 
-- The `embeddings` key configures the OpenAI, Voyage, and Ollama
-  providers; the [Configuring Embedding
+- The `embeddings` key configures the OpenAI, Voyage, Ollama, and
+  Gemini providers; the [Configuring Embedding
   Providers](../guide/embeddings.md) guide describes the fields per
   provider.
 
@@ -148,6 +148,17 @@ embeddings:
         model: "nomic-embed-text"
         # Optional, only required for Ollama Cloud.
         # api_key_file: "~/.ollama-api-key"
+
+    # Gemini ----------------------------------------------------------------
+    gemini:
+        enabled: false
+        # Path to a file containing the Gemini API key.
+        # Default: ~/.gemini-api-key
+        api_key_file: "~/.gemini-api-key"
+        # Embedding model.
+        # Options: gemini-embedding-001 (3072 dim).
+        # Default: gemini-embedding-001
+        model: "gemini-embedding-001"
 ```
 
 ## Supported Document Formats

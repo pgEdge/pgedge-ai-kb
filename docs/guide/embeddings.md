@@ -1,10 +1,10 @@
 # Configuring Embedding Providers
 
-The builder supports three embedding providers: OpenAI, Voyage AI, and
-Ollama. You enable each provider independently in the `embeddings`
-section of the configuration file; the build calls every enabled
-provider for every chunk and stores the resulting vectors in separate
-database columns.
+The builder supports four embedding providers: OpenAI, Voyage AI,
+Ollama, and Gemini. You enable each provider independently in the
+`embeddings` section of the configuration file; the build calls every
+enabled provider for every chunk and stores the resulting vectors in
+separate database columns.
 
 At least one provider must be enabled.
 
@@ -22,6 +22,10 @@ requirements. The following guidance applies in most deployments:
 
 - Ollama runs locally with no API key. Use Ollama for strict-privacy
   builds, air-gapped environments, or to avoid per-token costs.
+
+- Gemini offers Google's embedding models through the Gemini API.
+  Use Gemini when you want a Google-ecosystem provider or access to
+  the `gemini-embedding-001` model.
 
 Enabling multiple providers in one build is supported and stores all
 vectors in the output database. Downstream consumers can then pick a
@@ -99,6 +103,28 @@ defaults to `nomic-embed-text`. Use `https://ollama.com` and supply
 `api_key_file` if you target Ollama Cloud instead of a self-hosted
 instance.
 
+## Gemini
+
+The Gemini provider calls the Google Gemini embeddings API. Store
+the API key in a file with mode `0600`:
+
+```bash
+echo "AIza..." > ~/.gemini-api-key
+chmod 600 ~/.gemini-api-key
+```
+
+Then enable the provider:
+
+```yaml
+embeddings:
+    gemini:
+        enabled: true
+        api_key_file: "~/.gemini-api-key"
+        model: "gemini-embedding-001"
+```
+
+The `model` field defaults to `gemini-embedding-001`.
+
 ## Retry Behaviour
 
 The builder retries transient embedding API errors with exponential
@@ -140,7 +166,7 @@ provider.
 ### Clearing Embeddings
 
 Use `--clear-embeddings <provider>` to remove vectors for one
-provider. The flag accepts `openai`, `voyage`, or `ollama`:
+provider. The flag accepts `openai`, `voyage`, `ollama`, or `gemini`:
 
 ```bash
 ./bin/pgedge-ai-kb-builder --config build.yaml --clear-embeddings openai

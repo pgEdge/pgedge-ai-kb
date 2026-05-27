@@ -446,6 +446,12 @@ embeddings:
         api_key_file: "~/.voyage-api-key"   # Defaults to ~/.voyage-api-key
         model: "voyage-3"                    # Defaults to voyage-3
 
+    # Gemini embeddings
+    gemini:
+        enabled: false
+        api_key_file: "~/.gemini-api-key"   # Defaults to ~/.gemini-api-key
+        model: "gemini-embedding-001"        # Defaults to gemini-embedding-001
+
     # Ollama local embeddings
     ollama:
         enabled: true
