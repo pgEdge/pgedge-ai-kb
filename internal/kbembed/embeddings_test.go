@@ -69,19 +69,34 @@ func mustOpenAIClientWithBaseURL(t *testing.T, baseURL string) llm.Client {
 }
 
 // geminiMockServer returns an httptest.Server that mimics the Gemini
-// embedContent endpoint. The lib makes one HTTP call per text in a
-// batch, so the server returns a single embedding per request.
+// batchEmbedContents endpoint. The lib sends all texts in one HTTP
+// request and expects one embedding per sub-request in the response.
 func geminiMockServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(
 		w http.ResponseWriter, r *http.Request,
 	) {
+		var body struct {
+			Requests []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"requests"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		type embedding struct {
+			Values []float64 `json:"values"`
+		}
 		out := struct {
-			Embedding struct {
-				Values []float64 `json:"values"`
-			} `json:"embedding"`
+			Embeddings []embedding `json:"embeddings"`
 		}{}
-		out.Embedding.Values = []float64{0.1, 0.2, 0.3}
+		for range body.Requests {
+			out.Embeddings = append(out.Embeddings, embedding{
+				Values: []float64{0.1, 0.2, 0.3},
+			})
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}))
