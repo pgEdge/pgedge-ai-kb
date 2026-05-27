@@ -154,6 +154,16 @@ func run(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\nTotal chunks created/reused: %d\n", len(allChunks))
 
+	// Insert chunks (without embeddings) into the database FIRST so that
+	// each chunk gets a row ID. The embedding generator then persists
+	// embeddings incrementally per batch, which means a ctrl-C mid-run
+	// leaves the database in a recoverable state — re-run with
+	// --add-missing-embeddings to backfill.
+	fmt.Println("\n=== Storing chunks in Database ===")
+	if err := db.InsertChunks(allChunks); err != nil {
+		return fmt.Errorf("failed to insert chunks: %w", err)
+	}
+
 	// Generate embeddings
 	fmt.Println("\n=== Generating Embeddings ===")
 	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
@@ -169,12 +179,6 @@ func run(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  - %s: %v\n", provider, err)
 		}
 		fmt.Println("\nContinuing with partial embeddings. Use --add-missing-embeddings later to complete them.")
-	}
-
-	// Store in database
-	fmt.Println("\n=== Storing in Database ===")
-	if err := db.InsertChunks(allChunks); err != nil {
-		return fmt.Errorf("failed to insert chunks: %w", err)
 	}
 
 	// Print stats

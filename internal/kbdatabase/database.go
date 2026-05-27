@@ -192,7 +192,7 @@ func (d *Database) InsertChunks(chunks []*kbtypes.Chunk) error {
 			geminiBlob = serializeEmbedding(chunk.GeminiEmbedding)
 		}
 
-		_, err := stmt.Exec(
+		result, err := stmt.Exec(
 			chunk.Text,
 			chunk.Title,
 			chunk.Section,
@@ -208,6 +208,14 @@ func (d *Database) InsertChunks(chunks []*kbtypes.Chunk) error {
 		if err != nil {
 			return fmt.Errorf("failed to insert chunk %d: %w", i, err)
 		}
+
+		// Populate Chunk.ID from the newly inserted row so the embedding
+		// generator can persist embeddings to this row incrementally.
+		id, idErr := result.LastInsertId()
+		if idErr != nil {
+			return fmt.Errorf("failed to read inserted row id for chunk %d: %w", i, idErr)
+		}
+		chunk.ID = int(id)
 
 		// Track source file
 		if chunk.SourceFileChecksum != "" {

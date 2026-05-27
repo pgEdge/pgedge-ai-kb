@@ -309,6 +309,12 @@ func TestGeminiEmbeddingRoundTrip(t *testing.T) {
 		t.Fatalf("InsertChunks: %v", err)
 	}
 
+	// InsertChunks must populate Chunk.ID so the embedding generator can
+	// later persist embeddings to this specific row.
+	if chunk.ID == 0 {
+		t.Error("InsertChunks did not populate Chunk.ID")
+	}
+
 	got, err := db.GetAllChunks()
 	if err != nil {
 		t.Fatalf("GetAllChunks: %v", err)
