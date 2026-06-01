@@ -38,7 +38,7 @@ pgedge-ai-kb-builder binary distributed separately via GitHub Releases.
 # Build section
 # ============================================================================
 %prep
-# Nothing to extract — sources are copied directly in %install.
+# Nothing to extract — sources are copied directly into buildroot later.
 
 %build
 # Generate and sign an SBOM for the kb.db file.
@@ -72,7 +72,7 @@ install -m 644 %{SOURCE2} \
 cat > %{buildroot}%{_defaultdocdir}/%{sname}/VERSION << EOF
 PGEDGE_AI_KB_VERSION=%{version}-%{release}
 KB_DB_RELEASE_TAG=${KB_DB_RELEASE_TAG:-unknown}
-BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_DATE=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)
 BUILD_COMMIT=${GITHUB_SHA:-unknown}
 REPO_TYPE=${REPO_TYPE:-unknown}
 EOF
