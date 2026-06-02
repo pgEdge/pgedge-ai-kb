@@ -147,6 +147,8 @@ import_gpg_keys() {
 }
 
 sign_rpms() {
+  local rc=0
+
   # Check if at least one file is provided
   if [ $# -eq 0 ]; then
     echo "Error: No files provided to sign."
@@ -177,7 +179,10 @@ sign_rpms() {
   fi
 
   echo "=======================Signing RPMs======================="
-  # Sign each RPM file
+  # Sign each RPM file. Any per-file failure flips rc to 1 so the
+  # caller sees a non-zero exit; we keep iterating so the operator
+  # gets the full list of failures in one run rather than aborting
+  # on the first bad file.
   for file in "$@"; do
     # Ensure the file has /output/ prefix if relative
     if [[ ! "$file" = /* ]]; then
@@ -186,28 +191,30 @@ sign_rpms() {
 
     if [ ! -f "$file" ]; then
       echo "Error: File '$file' does not exist."
+      rc=1
       continue
     fi
 
     # Check if the file is an RPM
     if ! file "$file" | grep -q "RPM"; then
       echo "Error: File '$file' is not an RPM file."
+      rc=1
       continue
     fi
 
     # Sign the RPM using rpmsign, using passphrase if provided
-    rpmsign --define "_gpg_name $KEY_ID" --addsign "$file" >/dev/null 2>&1
-
-    if [ $? -eq 0 ]; then
+    if rpmsign --define "_gpg_name $KEY_ID" --addsign "$file" >/dev/null 2>&1; then
       echo "Successfully signed '$file'."
     else
       echo "Error: Failed to sign '$file'."
+      rc=1
     fi
   done
   echo "=======================Signing Completes=================="
 
   # Clean up
   rm -f "$PRIVATE_KEY_FILE"
+  return $rc
 }
 
 validate_signatures() {
