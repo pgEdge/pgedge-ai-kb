@@ -4,6 +4,11 @@
 
 version: 2
 
+# Project name controls the tarball filename prefix. Without this it would
+# default to the repo dir name (pgedge-ai-kb), but downstream packaging
+# expects the binary's name as the prefix.
+project_name: pgedge-ai-kb-builder
+
 before:
     hooks:
         - go fmt ./...
@@ -40,7 +45,11 @@ archives:
           - examples/pgedge-ai-kb-builder.yaml
 
 snapshot:
-    version_template: "{{ incpatch .Version }}-next"
+    # Use .Version verbatim so snapshot builds driven by
+    # GORELEASER_CURRENT_TAG (used by simulate_tag workflow runs) produce
+    # tarballs named with the exact tag-derived version that downstream
+    # packaging reconstructs from PGEDGE_KB_VERSION + PGEDGE_KB_BUILDNUM.
+    version_template: "{{ .Version }}"
 
 # Disable release creation - will be done in final job
 release:

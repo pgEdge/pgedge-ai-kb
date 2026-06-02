@@ -1,0 +1,45 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_builddeb:
+	dh_builddeb -- -Zgzip
+
+override_dh_auto_install:
+	# --- SBOM for the kb.db file ---
+	mkdir -p debian/tmp/sbom
+	syft file:$(CURDIR)/kb.db -o cyclonedx-json \
+		> debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
+	KEY_ID=$$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $$5}' | head -n 1); export KEY_ID; \
+	gpg --armor --detach-sign --default-key "$$KEY_ID" \
+		--output debian/tmp/sbom/pgedge-ai-kb-sbom.json.asc \
+		debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
+
+	# --- Knowledge base database ---
+	install -D -m 644 kb.db \
+		debian/pgedge-ai-kb/usr/share/pgedge/pgedge-ai-kb/kb.db
+
+	# --- Documentation ---
+	install -D -m 644 LICENSE.md \
+		debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/LICENSE.md
+	install -D -m 644 README.md \
+		debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/README.md
+
+	# VERSION metadata — env vars come from build-deb.sh / common.sh.
+	install -d debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb
+	{ \
+		echo "PGEDGE_AI_KB_VERSION=$${PGEDGE_KB_VERSION}-$${PGEDGE_KB_BUILDNUM}"; \
+		echo "KB_DB_RELEASE_TAG=$${KB_DB_RELEASE_TAG:-unknown}"; \
+		echo "BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		echo "BUILD_COMMIT=$${GITHUB_SHA:-unknown}"; \
+		echo "REPO_TYPE=$${REPO_TYPE:-unknown}"; \
+	} > debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/VERSION
+
+	# --- SBOM install ---
+	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-sbom.json \
+		debian/pgedge-ai-kb/usr/share/pgedge-ai-kb-sbom.json
+	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-sbom.json.asc \
+		debian/pgedge-ai-kb/usr/share/pgedge-ai-kb-sbom.json.asc
+
+	rm -rf debian/tmp/sbom

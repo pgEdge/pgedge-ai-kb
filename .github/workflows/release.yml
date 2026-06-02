@@ -5,13 +5,35 @@ on:
         tags:
             - 'v*'
     workflow_dispatch:
+        inputs:
+            simulate_tag:
+                description: 'Simulate a tag push for end-to-end branch testing (e.g. v0.0.1-test1). Blank = binary snapshot only. Backup-to-S3 and repo-push stay disabled — only real v* tag pushes reach S3.'
+                required: false
+                default: ''
+            force_push:
+                description: 'On a real v* tag push: publish artifacts from cells that succeeded even if some failed. Ignored on simulate_tag runs (push is always gated off there).'
+                required: false
+                type: boolean
+                default: false
+            regenerate_kb_db:
+                description: 'Regenerate kb.db from scratch (default). Set false to use the latest published kb-* GitHub release instead. Skipping regen saves hours + API credits but ships whatever was last published.'
+                required: false
+                type: boolean
+                default: true
 
 permissions:
     contents: write
     packages: write
 
+concurrency:
+    group: release-${{ github.ref_name }}
+    cancel-in-progress: false
+
 jobs:
-    # Build for x86_64 architecture
+    # =========================================================================
+    # Binary builds (unchanged from prior version)
+    # =========================================================================
+
     build-amd64:
         name: Build x86_64
         runs-on: ubuntu-latest
@@ -41,6 +63,10 @@ jobs:
                   args: release --clean --config .goreleaser-amd64.yaml ${{ github.event_name == 'workflow_dispatch' && github.ref_type != 'tag' && '--snapshot' || '' }}
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  # On a real v* tag push, ref_name is the tag. On
+                  # simulate_tag dispatch, use the simulated tag so the
+                  # produced tarball filename matches what packaging expects.
+                  GORELEASER_CURRENT_TAG: ${{ github.event.inputs.simulate_tag || github.ref_name }}
 
             - name: Upload amd64 artifacts
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -51,7 +77,6 @@ jobs:
                       dist/*.zip
                   retention-days: 1
 
-    # Build for ARM64 architecture
     build-arm64:
         name: Build ARM64
         runs-on: ubuntu-24.04-arm
@@ -81,6 +106,7 @@ jobs:
                   args: release --clean --config .goreleaser-arm64.yaml ${{ github.event_name == 'workflow_dispatch' && github.ref_type != 'tag' && '--snapshot' || '' }}
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GORELEASER_CURRENT_TAG: ${{ github.event.inputs.simulate_tag || github.ref_name }}
 
             - name: Upload arm64 artifacts
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -91,12 +117,20 @@ jobs:
                       dist/*.zip
                   retention-days: 1
 
-    # Combine artifacts and create release
     release:
         name: Create Release
         runs-on: ubuntu-latest
-        needs: [build-amd64, build-arm64]
-        if: github.ref_type == 'tag'
+        # Wait for the kb.db pipeline too so the GH release can include it
+        # as a downloadable asset alongside the binary tarballs.
+        needs: [build-amd64, build-arm64, validate-kb-db]
+        # always() + explicit needs check is required because validate-kb-db
+        # has an OR'd dependency chain; the default success() check would
+        # mistakenly propagate the SKIPPED status from the unused branch.
+        if: |
+            always() && github.ref_type == 'tag' &&
+            needs.build-amd64.result == 'success' &&
+            needs.build-arm64.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -115,13 +149,20 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist/
 
-            - name: List all artifacts
-              run: ls -lh dist/
+            - name: Download kb.db
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: dist/
 
             - name: Generate checksums
               run: |
                   cd dist
-                  sha256sum *.tar.gz *.zip > checksums.txt
+                  # RELEASE_TAG is an internal coordination file (consumed
+                  # by build-rpm.sh / build-deb.sh inside the build container)
+                  # and isn't a user-facing artifact, so it's not checksummed
+                  # and isn't listed in the release files below.
+                  sha256sum *.tar.gz *.zip kb.db > checksums.txt
                   cat checksums.txt
 
             - name: Create GitHub Release
@@ -130,6 +171,7 @@ jobs:
                   files: |
                       dist/*.tar.gz
                       dist/*.zip
+                      dist/kb.db
                       dist/checksums.txt
                   generate_release_notes: true
                   draft: false
@@ -137,12 +179,1168 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Upload final artifacts
+    # =========================================================================
+    # Packaging pipeline (new) — RPM + DEB build, sign, push, backup, manifest
+    # =========================================================================
+
+    determine-repo-type:
+        name: Determine repo routing
+        runs-on: ubuntu-latest
+        # Runs when a real v* tag is pushed, or when workflow_dispatch was
+        # invoked with simulate_tag set. The latter enables branch-side
+        # end-to-end packaging tests without touching S3 / live repos.
+        if: github.ref_type == 'tag' || github.event.inputs.simulate_tag != ''
+        outputs:
+            repo-type: ${{ steps.ctx.outputs.repo-type }}
+            component-version: ${{ steps.ctx.outputs.component-version }}
+            component-buildnum: ${{ steps.ctx.outputs.component-buildnum }}
+            effective-tag: ${{ steps.ctx.outputs.effective-tag }}
+            simulated: ${{ steps.ctx.outputs.simulated }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Parse tag and source pkg/common.sh
+              id: ctx
+              env:
+                  SIMULATE_TAG: ${{ github.event.inputs.simulate_tag }}
+              run: |
+                  set -euo pipefail
+
+                  # Pick the effective tag: simulate_tag input wins if non-empty,
+                  # otherwise the real pushed tag. The if-guard above ensures
+                  # at least one is set when we get here.
+                  if [ -n "${SIMULATE_TAG}" ]; then
+                      effective_tag="${SIMULATE_TAG}"
+                      simulated=true
+                      echo "::notice::Simulated tag mode — using ${effective_tag}"
+                  else
+                      effective_tag="${GITHUB_REF_NAME}"
+                      simulated=false
+                  fi
+
+                  case "${effective_tag}" in
+                      v*-test*|v*-dev*)
+                          repo_type=daily
+                          ;;
+                      v*-rc*|v*-beta*|v*-alpha*|v*)
+                          repo_type=staging
+                          ;;
+                      *)
+                          echo "::error::Unsupported tag pattern: ${effective_tag}"
+                          exit 1
+                          ;;
+                  esac
+
+                  # Extract version + buildnum from the tag.
+                  #   v1.0.0          -> cv=1.0.0      cbn=1
+                  #   v1.0.0-beta1    -> cv=1.0.0      cbn=beta1_1
+                  #   v0.0.1-test1    -> cv=0.0.1      cbn=test1_1
+                  # The trailing "_1" is the package-iteration counter; bump
+                  # COMPONENT_BUILDNUM manually if a second build of the same
+                  # upstream tag is ever needed.
+                  ref="${effective_tag#v}"
+                  if [[ "${ref}" == *-* ]]; then
+                      cv="${ref%%-*}"
+                      cbn="${ref#*-}_1"
+                  else
+                      cv="${ref}"
+                      cbn="1"
+                  fi
+
+                  echo "repo-type=${repo_type}"         >> "$GITHUB_OUTPUT"
+                  echo "component-version=${cv}"        >> "$GITHUB_OUTPUT"
+                  echo "component-buildnum=${cbn}"      >> "$GITHUB_OUTPUT"
+                  echo "effective-tag=${effective_tag}" >> "$GITHUB_OUTPUT"
+                  echo "simulated=${simulated}"         >> "$GITHUB_OUTPUT"
+
+                  echo "Tag:                ${effective_tag}"
+                  echo "Simulated:          ${simulated}"
+                  echo "Repo type:          ${repo_type}"
+                  echo "Component version:  ${cv}"
+                  echo "Component buildnum: ${cbn}"
+
+    # -------------------------------------------------------------------------
+    # kb.db sourcing — either generate inline or discover latest published.
+    # Exactly one of generate-kb-db / discover-kb-db runs per workflow run;
+    # both produce the same artifact name `kb-db-validated` containing kb.db
+    # plus a RELEASE_TAG file. validate-kb-db is the downstream gate.
+    # -------------------------------------------------------------------------
+
+    generate-kb-db:
+        name: Generate kb.db (inline)
+        needs: determine-repo-type
+        # Default behavior is to regenerate. Set workflow_dispatch input
+        # `regenerate_kb_db: false` to skip and use the latest published
+        # kb-* release instead.
+        if: github.event.inputs.regenerate_kb_db != 'false'
+        runs-on: [ollama, self-hosted]
+        outputs:
+            kb-db-release-tag: ${{ steps.tag.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+              with:
+                  fetch-depth: 0
+
+            - name: Clean build artifacts from previous runs
+              run: rm -rf bin/ pgedge-ai-kb-builder examples/pgedge-ai-kb-builder-build.yaml
+
+            - name: Set up Go
+              uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+              with:
+                  go-version: '1.25'
+                  cache: true
+
+            - name: Configure git for private repo access
+              env:
+                  PGEDGE_BUILDER_TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  [ -n "$PGEDGE_BUILDER_TOKEN" ] || { echo "PGEDGE_BUILDER_TOKEN secret is missing"; exit 1; }
+                  echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+                  printf '' > "$RUNNER_TEMP/gitconfig"
+                  GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global credential.helper ""
+                  GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global url."https://x-access-token:${PGEDGE_BUILDER_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+            - name: Start Ollama service
+              run: |
+                  ollama serve &
+                  echo $! > "$RUNNER_TEMP/ollama.pid"
+                  timeout=60; elapsed=0
+                  until curl -s http://localhost:11434/api/tags > /dev/null; do
+                    sleep 2; elapsed=$((elapsed + 2))
+                    if [ "$elapsed" -ge "$timeout" ]; then echo "Ollama did not start within ${timeout}s"; exit 1; fi
+                  done
+                  ollama pull nomic-embed-text
+                  echo "Ollama ready with nomic-embed-text"
+
+            - name: Build kb-builder binary
+              run: CGO_ENABLED=0 go build -o pgedge-ai-kb-builder ./cmd/kb-builder
+
+            - name: Setup API keys for kb-builder
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
+                  [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
+                  mkdir -p "$API_KEYS_DIR"
+                  printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
+                  printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
+                  chmod 600 "$API_KEYS_DIR"/*
+
+            - name: Configure kb-builder for cloud providers
+              env:
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  set -euo pipefail
+                  cfg=examples/pgedge-ai-kb-builder-build.yaml
+                  cp examples/pgedge-ai-kb-builder.yaml "${cfg}"
+                  # Single sed invocation with multiple -e expressions, then
+                  # write-to-temp + mv. Avoids `sed -i ''` (BSD-only) and
+                  # `sed -i` (GNU-only); this form works on both since the
+                  # self-hosted runner OS isn't pinned here.
+                  sed \
+                      -e 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' \
+                      -e "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" \
+                      -e "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" \
+                      -e 's|git@github.com:|https://github.com/|g' \
+                      "${cfg}" > "${cfg}.new"
+                  mv "${cfg}.new" "${cfg}"
+                  grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "database_path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" "${cfg}" || { echo "OpenAI key path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" "${cfg}" || { echo "Voyage key path replacement failed"; exit 1; }
+                  grep -q 'https://github.com/' "${cfg}" || { echo "SSH URL replacement failed"; exit 1; }
+
+            - name: Generate kb.db (capturing log for coverage check)
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+              run: |
+                  mkdir -p bin
+                  # Tee preserves the log for the per-provider coverage check
+                  # while still streaming to the workflow's live log.
+                  ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50 \
+                    2>&1 | tee bin/kb-builder.log
+
+            - name: Verify kb.db was created
+              run: |
+                  [ -f "bin/kb.db" ] || { echo "::error::bin/kb.db was not created"; exit 1; }
+                  echo "kb.db size: $(du -sh bin/kb.db | cut -f1)"
+
+            - name: Verify per-provider coverage (OpenAI, Voyage, Ollama)
+              # Each provider must log a "<Provider>: Processed N/M chunks"
+              # line where the LAST such line shows N == M (every batch
+              # finished). Strict mode: all three providers must be present.
+              # If a provider is intentionally disabled in the config, this
+              # check will fail — that's intentional per release policy.
+              run: |
+                  set -euo pipefail
+                  log=bin/kb-builder.log
+                  [ -f "$log" ] || { echo "::error::kb-builder.log missing"; exit 1; }
+
+                  fail=0
+                  for provider in OpenAI Voyage Ollama; do
+                      last=$(grep -E "^[[:space:]]*${provider}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
+                      if [ -z "$last" ]; then
+                          echo "::error::${provider}: no 'Processed X/Y chunks' lines in log (provider missing or disabled)"
+                          fail=1
+                          continue
+                      fi
+                      done=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\1|')
+                      total=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\2|')
+                      if [ "$done" = "$total" ]; then
+                          echo "${provider}: ${done}/${total} ✓"
+                      else
+                          echo "::error::${provider} embedded only ${done} of ${total} chunks"
+                          fail=1
+                      fi
+                  done
+                  [ "$fail" = "0" ] || exit 1
+
+            - name: Compute synthetic release tag
+              id: tag
+              run: |
+                  # Synthetic tag for an inline-generated kb.db. Embeds the
+                  # workflow run ID so packaging traces back unambiguously.
+                  tag="kb-$(date -u +%Y-%m-%d)-r${GITHUB_RUN_ID}"
+                  echo "kb-db-release-tag=${tag}" >> "$GITHUB_OUTPUT"
+                  echo "${tag}" > bin/RELEASE_TAG
+                  echo "Generated: ${tag}"
+
+            - name: Cleanup (ollama + API keys)
+              if: always()
+              env:
+                  API_KEYS_DIR: ${{ runner.temp }}/api-keys
+              run: |
+                  if [ -f "$RUNNER_TEMP/ollama.pid" ]; then
+                    kill "$(cat "$RUNNER_TEMP/ollama.pid")" 2>/dev/null || true
+                    rm -f "$RUNNER_TEMP/ollama.pid"
+                  fi
+                  rm -rf "$API_KEYS_DIR"
+                  rm -f "$RUNNER_TEMP/gitconfig"
+
+            - name: Upload kb-db-validated artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: release-artifacts-all
+                  name: kb-db-validated
                   path: |
-                      dist/*.tar.gz
-                      dist/*.zip
-                      dist/checksums.txt
+                      bin/kb.db
+                      bin/RELEASE_TAG
+                  retention-days: 7
+
+    discover-kb-db:
+        name: Discover latest published kb.db
+        needs: determine-repo-type
+        # Opt-in alternative path when regenerate_kb_db=false. Downloads
+        # whatever the most recent kb-* GitHub release is. Useful for
+        # iterating on packaging without spending hours regenerating.
+        if: github.event.inputs.regenerate_kb_db == 'false'
+        runs-on: ubuntu-latest
+        outputs:
+            kb-db-release-tag: ${{ steps.find.outputs.kb-db-release-tag }}
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - name: Find latest kb-* release
+              id: find
+              run: |
+                  set -euo pipefail
+                  tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+                      --jq '[.[] | select(.tag_name | startswith("kb-"))] | .[0].tag_name')
+                  if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+                      echo "::error::No kb-* releases found in ${GITHUB_REPOSITORY}"
+                      exit 1
+                  fi
+                  echo "kb-db-release-tag=${tag}" >> "$GITHUB_OUTPUT"
+                  echo "Latest kb-* release: ${tag}"
+
+            - name: Download kb.db
+              env:
+                  KB_TAG: ${{ steps.find.outputs.kb-db-release-tag }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p bin
+                  gh release download "${KB_TAG}" \
+                      --repo "${GITHUB_REPOSITORY}" \
+                      --pattern 'kb.db' \
+                      --dir bin
+                  echo "${KB_TAG}" > bin/RELEASE_TAG
+                  ls -lh bin/
+
+            - name: Upload kb-db-validated artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-validated
+                  path: |
+                      bin/kb.db
+                      bin/RELEASE_TAG
+                  retention-days: 7
+
+    validate-kb-db:
+        name: Validate kb.db
+        runs-on: ubuntu-latest
+        # Gate downstream packaging. Runs after whichever upstream produced
+        # the artifact; downstream `needs: validate-kb-db` ensures sequencing.
+        needs: [determine-repo-type, generate-kb-db, discover-kb-db]
+        if: |
+            always() && (
+              needs.generate-kb-db.result == 'success' ||
+              needs.discover-kb-db.result == 'success'
+            )
+        outputs:
+            # Proxy the upstream's tag so downstream consumers have one
+            # place to look (whether the kb.db was generated or discovered).
+            kb-db-release-tag: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
+        steps:
+            - name: Install sqlite3
+              run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+            - name: Download kb-db-validated artifact
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: kb.db.cached/
+
+            - name: Validate schema, row counts, embedding dimensions
+              run: |
+                  set -euo pipefail
+                  db=kb.db.cached/kb.db
+
+                  size=$(stat -c%s "${db}" 2>/dev/null || stat -f%z "${db}")
+                  echo "kb.db size: ${size} bytes"
+                  if [ "${size}" -lt 10485760 ]; then
+                      echo "::error::kb.db smaller than 10 MB (${size} bytes)"
+                      exit 1
+                  fi
+
+                  tables=$(sqlite3 "${db}" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+                  echo "Tables found:"; echo "${tables}" | sed 's/^/  /'
+                  echo "${tables}" | grep -qx chunks       || { echo "::error::missing table chunks";       exit 1; }
+                  echo "${tables}" | grep -qx source_files || { echo "::error::missing table source_files"; exit 1; }
+
+                  chunk_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM chunks;")
+                  echo "chunks count: ${chunk_count}"
+                  if [ "${chunk_count}" -lt 1000 ]; then
+                      echo "::error::chunk count ${chunk_count} below floor 1000"
+                      exit 1
+                  fi
+
+                  src_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM source_files;")
+                  echo "source_files count: ${src_count}"
+                  if [ "${src_count}" -lt 1 ]; then
+                      echo "::error::no source_files recorded"
+                      exit 1
+                  fi
+
+                  # Embedding-dimension consistency: each provider column
+                  # must have a single distinct BLOB length across all rows
+                  # where set. Columns may be NULL for chunks not embedded
+                  # by that provider — those rows are excluded from the
+                  # check. (The strict per-provider coverage assertion lives
+                  # in generate-kb-db; this is the basic sanity check that
+                  # both inline and discovered kb.db files pass through.)
+                  for col in openai_embedding voyage_embedding ollama_embedding; do
+                      dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;" || true)
+                      if [ -z "${dims}" ]; then
+                          echo "  ${col}: not populated (skipping)"
+                          continue
+                      fi
+                      n_dims=$(echo "${dims}" | grep -c .)
+                      if [ "${n_dims}" -gt 1 ]; then
+                          echo "::error::inconsistent ${col} dimensions: ${dims}"
+                          exit 1
+                      fi
+                      echo "  ${col}: dimension ${dims}"
+                  done
+
+                  echo "kb.db validation passed"
+
+    # -------------------------------------------------------------------------
+    # RPM packaging
+    # -------------------------------------------------------------------------
+
+    package-rpm:
+        name: Package RPM (${{ matrix.image }} noarch)
+        needs: [determine-repo-type, validate-kb-db]
+        # always() + explicit needs check is required because validate-kb-db
+        # has an OR'd dependency (generate-kb-db || discover-kb-db) and the
+        # default success() check would mistakenly propagate the SKIPPED
+        # status from the unused branch into our gating decision.
+        if: |
+            always() &&
+            needs.determine-repo-type.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
+        runs-on: ubuntu-latest
+        # Package is noarch (data-only kb.db). One cell per EL major; built
+        # on amd64 runner since the resulting RPM is arch-independent.
+        strategy:
+            fail-fast: false
+            matrix:
+                image: ['almalinux:9', 'almalinux:10']
+        env:
+            REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+            COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
+            KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Compute per-cell vars
+              id: vars
+              run: |
+                  set -euo pipefail
+                  case "${{ matrix.image }}" in
+                      *:9)  os_version=9  ;;
+                      *:10) os_version=10 ;;
+                      *)    echo "::error::Unexpected image ${{ matrix.image }}"; exit 1 ;;
+                  esac
+                  echo "os-version=${os_version}"     >> "$GITHUB_OUTPUT"
+                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Download validated kb.db
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: pkg/kb.db.cached/
+
+            - name: Checkout pgEdge action repos
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  # Build cells only need the builder action — backup +
+                  # repo-builder live in push-dnf / push-apt jobs now.
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-builder-action.git" \
+                      ".github/actions/pgedge-builder-action"
+
+            - name: Build RPM
+              uses: ./.github/actions/pgedge-builder-action
+              with:
+                  image: ${{ matrix.image }}
+                  arch: amd64
+                  component_name: pkg
+                  component_version: ${{ env.COMPONENT_VERSION }}
+                  component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
+                  repo_type: ${{ env.REPO_TYPE }}
+                  gpg_private_key: ${{ secrets.GPG_FIPS_RPM_PRIVATE_KEY }}
+                  gpg_public_key: ${{ secrets.GPG_FIPS_RPM_PUBLIC_KEY }}
+                  pgedge_builder_token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+
+            - name: Upload RPM cell artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: rpm__el-${{ steps.vars.outputs.os-version }}
+                  path: output/el${{ steps.vars.outputs.os-version }}-amd64/
+                  retention-days: 7
+
+    push-dnf:
+        name: Push DNF (all EL majors, serial)
+        # Strictly tag-only — branch tests (simulate_tag) never push to live repos.
+        # force_push lets a maintainer publish from a partial build (some
+        # cells failed). Without it, any failed cell skips the whole push.
+        if: |
+            always() && github.ref_type == 'tag' &&
+            (needs.package-rpm.result == 'success' ||
+             (github.event.inputs.force_push == 'true' && needs.package-rpm.result != 'cancelled'))
+        needs: [determine-repo-type, package-rpm]
+        runs-on: ubuntu-latest
+        # Single job across all EL majors. Steps below invoke the dnf repo
+        # builder once per major sequentially so two majors never write to S3
+        # at the same time. Concurrency groups one push job per repo-type so
+        # two simultaneous tag pushes serialize at the bucket boundary.
+        concurrency:
+            group: dnf-push-${{ needs.determine-repo-type.outputs.repo-type }}
+            cancel-in-progress: false
+        # Timestamp is the one passed to pgedge-backup-artifacts, so the
+        # published manifest references the exact S3 prefix written.
+        outputs:
+            timestamp: ${{ steps.organize.outputs.timestamp }}
+        env:
+            REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+            COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_NAME: ${{ github.event.repository.name }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Download all RPM cell artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  pattern: rpm__el-*
+                  path: rpm-artifacts
+                  # Keep per-cell subdirs (one per EL major). Package is
+                  # noarch so there's no arch dimension anymore.
+                  merge-multiple: false
+
+            - name: Organize RPMs by EL major
+              id: organize
+              run: |
+                  set -euo pipefail
+                  for os_version in 9 10; do
+                      mkdir -p "rpms-el${os_version}"
+                      src_dir="rpm-artifacts/rpm__el-${os_version}"
+                      if [ -d "${src_dir}" ]; then
+                          find "${src_dir}" -type f -name '*.rpm' -exec mv -v {} "rpms-el${os_version}/" \;
+                      fi
+                      count=$(find "rpms-el${os_version}" -maxdepth 1 -name '*.rpm' | wc -l)
+                      echo "EL${os_version}: ${count} RPMs"
+                  done
+                  rm -rf rpm-artifacts
+                  # Single timestamp shared by all backups in this push job.
+                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout pgEdge action repos @multi-target
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  # Pinned to the multi-target branch so this repo's pipeline
+                  # is the only consumer of the new batched-targets path.
+                  # Other repos still pin @main and see no behavior change.
+                  for repo in pgedge-dnf-repo-builder pgedge-backup-artifacts; do
+                      git clone --depth 1 --branch multi-target \
+                          "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
+                          ".github/actions/${repo}"
+                  done
+
+            - name: Push RPMs to yum repo (EL9 + EL10 batched)
+              uses: ./.github/actions/pgedge-dnf-repo-builder
+              with:
+                  s3-bucket: ${{ secrets.S3_BUCKET_NAME }}
+                  cf-distribution: ${{ secrets.CLOUDFRONT_DISTRIBUTION }}
+                  repo-type: ${{ env.REPO_TYPE }}
+                  # Both OSes in one invocation. Empty rpm-dirs (e.g. under
+                  # force_push partial failure) are skipped inside the action.
+                  targets: |
+                      [
+                        {"os-version": "9",  "rpm-dir": "rpms-el9"},
+                        {"os-version": "10", "rpm-dir": "rpms-el10"}
+                      ]
+                  # Cross-repo push lock — every consumer that touches
+                  # dnf.pgedge.com must pass this so they all serialize
+                  # against the same _dnf_lock/ prefix.
+                  lock-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Back up RPMs to S3 (EL9 + EL10 batched)
+              uses: ./.github/actions/pgedge-backup-artifacts
+              with:
+                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  repo-type: ${{ env.REPO_TYPE }}
+                  component-name: ${{ env.COMPONENT_NAME }}
+                  component-version: ${{ env.COMPONENT_VERSION }}
+                  timestamp: ${{ steps.organize.outputs.timestamp }}
+                  # mktemp -d inside the action gives each target its own
+                  # staging dir; the old "Reset backup staging dir" steps
+                  # are no longer needed.
+                  targets: |
+                      [
+                        {"os-version": "9",  "output-dir": "rpms-el9"},
+                        {"os-version": "10", "output-dir": "rpms-el10"}
+                      ]
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            # No manifest writes here — publish-manifest reconstructs backup
+            # paths from this job's timestamp output.
+
+    # -------------------------------------------------------------------------
+    # DEB packaging
+    # -------------------------------------------------------------------------
+
+    package-deb:
+        name: Package DEB (${{ matrix.image }} all)
+        needs: [determine-repo-type, validate-kb-db]
+        # See package-rpm for why always() + explicit needs check is needed.
+        if: |
+            always() &&
+            needs.determine-repo-type.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
+        runs-on: ubuntu-latest
+        # Package is Architecture: all (data-only kb.db). One cell per distro;
+        # built on amd64 runner since the resulting DEB is arch-independent.
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { image: 'ubuntu:jammy',    distro: jammy    }
+                    - { image: 'ubuntu:noble',    distro: noble    }
+                    - { image: 'debian:bullseye', distro: bullseye }
+                    - { image: 'debian:bookworm', distro: bookworm }
+                    - { image: 'debian:trixie',   distro: trixie   }
+        env:
+            REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+            COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
+            KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Compute per-cell vars
+              id: vars
+              run: |
+                  set -euo pipefail
+                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Download validated kb.db
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: kb-db-validated
+                  path: pkg/kb.db.cached/
+
+            - name: Checkout pgEdge action repos
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  # Build cells only need the builder action — backup +
+                  # repo-builder live in push-dnf / push-apt jobs now.
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-builder-action.git" \
+                      ".github/actions/pgedge-builder-action"
+
+            - name: Build DEB
+              uses: ./.github/actions/pgedge-builder-action
+              with:
+                  image: ${{ matrix.image }}
+                  arch: amd64
+                  component_name: pkg
+                  component_version: ${{ env.COMPONENT_VERSION }}
+                  component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
+                  repo_type: ${{ env.REPO_TYPE }}
+                  gpg_private_key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
+                  gpg_public_key: ${{ secrets.GPG_FIPS_DEB_PUBLIC_KEY }}
+                  pgedge_builder_token: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+
+            - name: Upload DEB cell artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: deb__${{ matrix.distro }}
+                  path: output/${{ matrix.distro }}-amd64/
+                  retention-days: 7
+
+    push-apt:
+        name: Push APT (all distros, serial)
+        # Strictly tag-only — branch tests (simulate_tag) never push to live repos.
+        # force_push lets a maintainer publish from a partial build.
+        if: |
+            always() && github.ref_type == 'tag' &&
+            (needs.package-deb.result == 'success' ||
+             (github.event.inputs.force_push == 'true' && needs.package-deb.result != 'cancelled'))
+        needs: [determine-repo-type, package-deb]
+        runs-on: ubuntu-latest
+        # Single job across all distros. Push + backup are invoked once per
+        # distro sequentially below; no parallel writes to the apt S3 bucket.
+        concurrency:
+            group: apt-push-${{ needs.determine-repo-type.outputs.repo-type }}
+            cancel-in-progress: false
+        # Timestamp differs from push-dnf's; each push job picks its own on
+        # entry, matching the unified workflow's per-family timestamp.
+        outputs:
+            timestamp: ${{ steps.organize.outputs.timestamp }}
+        env:
+            REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+            COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+            COMPONENT_NAME: ${{ github.event.repository.name }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Download all DEB cell artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  pattern: deb__*
+                  path: deb-artifacts
+                  merge-multiple: false
+
+            - name: Organize DEBs by distro
+              id: organize
+              run: |
+                  set -euo pipefail
+                  for distro in jammy noble bullseye bookworm trixie; do
+                      mkdir -p "debs-${distro}"
+                      src_dir="deb-artifacts/deb__${distro}"
+                      if [ -d "${src_dir}" ]; then
+                          find "${src_dir}" -type f -name '*.deb' -exec mv -v {} "debs-${distro}/" \;
+                      fi
+                      count=$(find "debs-${distro}" -maxdepth 1 -name '*.deb' | wc -l)
+                      echo "${distro}: ${count} DEBs"
+                  done
+                  rm -rf deb-artifacts
+                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout pgEdge action repos @multi-target
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  # Pinned to the multi-target branch — see push-dnf for
+                  # the rationale.
+                  for repo in pgedge-apt-repo-builder pgedge-backup-artifacts; do
+                      git clone --depth 1 --branch multi-target \
+                          "https://x-access-token:${TOKEN}@github.com/pgEdge/${repo}.git" \
+                          ".github/actions/${repo}"
+                  done
+
+            - name: Push DEBs to apt repo (all 5 distros batched)
+              uses: ./.github/actions/pgedge-apt-repo-builder
+              with:
+                  s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
+                  cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
+                  repo-type: ${{ env.REPO_TYPE }}
+                  # All 5 distros in one invocation. One reprepro setup,
+                  # one CloudFront invalidate covering all distro prefixes.
+                  # Empty deb-dirs (under force_push partial failure) are
+                  # skipped inside the action.
+                  # When ubuntu:resolute joins the build matrix, add a
+                  # debs-resolute cell to package-deb and insert this entry
+                  # into the targets array below (and into the backup
+                  # targets a few lines down):
+                  #   {"os-name": "ubuntu:resolute", "deb-dir": "debs-resolute"}
+                  targets: |
+                      [
+                        {"os-name": "ubuntu:jammy",    "deb-dir": "debs-jammy"},
+                        {"os-name": "ubuntu:noble",    "deb-dir": "debs-noble"},
+                        {"os-name": "debian:bullseye", "deb-dir": "debs-bullseye"},
+                        {"os-name": "debian:bookworm", "deb-dir": "debs-bookworm"},
+                        {"os-name": "debian:trixie",   "deb-dir": "debs-trixie"}
+                      ]
+                  # Cross-repo push lock — every consumer that touches
+                  # apt.pgedge.com must pass this so they all serialize
+                  # against the same _apt_lock/ prefix.
+                  lock-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            - name: Back up DEBs to S3 (all 5 distros batched)
+              uses: ./.github/actions/pgedge-backup-artifacts
+              with:
+                  s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  repo-type: ${{ env.REPO_TYPE }}
+                  component-name: ${{ env.COMPONENT_NAME }}
+                  component-version: ${{ env.COMPONENT_VERSION }}
+                  timestamp: ${{ steps.organize.outputs.timestamp }}
+                  # mktemp -d inside the action gives each target its own
+                  # staging dir; the old "Reset backup staging dir" steps
+                  # are no longer needed.
+                  #
+                  # When ubuntu:resolute joins the matrix, add:
+                  #   {"os-version": "resolute", "output-dir": "debs-resolute"}
+                  targets: |
+                      [
+                        {"os-version": "jammy",    "output-dir": "debs-jammy"},
+                        {"os-version": "noble",    "output-dir": "debs-noble"},
+                        {"os-version": "bullseye", "output-dir": "debs-bullseye"},
+                        {"os-version": "bookworm", "output-dir": "debs-bookworm"},
+                        {"os-version": "trixie",   "output-dir": "debs-trixie"}
+                      ]
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+            # No manifest writes here — publish-manifest reconstructs backup
+            # paths from this job's timestamp output.
+
+    # -------------------------------------------------------------------------
+    # Aggregated manifest for the future promotion tool
+    # -------------------------------------------------------------------------
+
+    publish-manifest:
+        name: Publish aggregated backup manifest
+        needs: [determine-repo-type, validate-kb-db, push-dnf, push-apt]
+        if: always() && needs.determine-repo-type.result == 'success'
+        runs-on: ubuntu-latest
+        env:
+            COMPONENT_NAME: ${{ github.event.repository.name }}
+        steps:
+            - name: Install jq + awscli
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y python3-pip jq
+                  pip3 install --user awscli
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+            - name: Build path-only manifest
+              env:
+                  REPO_TYPE:        ${{ needs.determine-repo-type.outputs.repo-type }}
+                  CV:               ${{ needs.determine-repo-type.outputs.component-version }}
+                  CBN:              ${{ needs.determine-repo-type.outputs.component-buildnum }}
+                  KB_TAG:           ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+                  EFFECTIVE_TAG:    ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  SIMULATED:        ${{ needs.determine-repo-type.outputs.simulated }}
+                  PUSH_DNF_RESULT:  ${{ needs.push-dnf.result }}
+                  PUSH_APT_RESULT:  ${{ needs.push-apt.result }}
+                  DNF_TS:           ${{ needs.push-dnf.outputs.timestamp }}
+                  APT_TS:           ${{ needs.push-apt.outputs.timestamp }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p aggregated
+
+                  # Reconstruct backup paths from each push job's timestamp.
+                  # Paths are bucket-relative on purpose — the bucket name
+                  # is a deployment secret and must not appear in the
+                  # manifest artifact (which is retained for 90 days and
+                  # uploaded to S3 for the promotion tool). Consumers
+                  # resolve the bucket from their own config.
+                  #
+                  # We unconditionally list every matrix target — under
+                  # force_push partial failure, a listed prefix may be empty
+                  # in S3 and the promoter handles that via `aws s3 ls`.
+                  dnf_backups='[]'
+                  if [ -n "${DNF_TS}" ]; then
+                      for os in 9 10; do
+                          path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
+                          dnf_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${dnf_backups}")"
+                      done
+                  fi
+
+                  apt_backups='[]'
+                  if [ -n "${APT_TS}" ]; then
+                      for distro in jammy noble bullseye bookworm trixie; do
+                          path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
+                          apt_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${apt_backups}")"
+                      done
+                  fi
+
+                  jq -n \
+                      --arg     run_id              "${GITHUB_RUN_ID}" \
+                      --arg     run_attempt         "${GITHUB_RUN_ATTEMPT}" \
+                      --arg     repo                "${GITHUB_REPOSITORY}" \
+                      --arg     tag                 "${EFFECTIVE_TAG}" \
+                      --argjson simulated           "${SIMULATED}" \
+                      --arg     commit_sha          "${GITHUB_SHA}" \
+                      --arg     component_name      "${COMPONENT_NAME}" \
+                      --arg     component_version   "${CV}" \
+                      --arg     component_buildnum  "${CBN}" \
+                      --arg     kb_db_release_tag   "${KB_TAG}" \
+                      --arg     repo_type           "${REPO_TYPE}" \
+                      --arg     dnf_timestamp       "${DNF_TS}" \
+                      --arg     apt_timestamp       "${APT_TS}" \
+                      --arg     push_dnf_outcome    "${PUSH_DNF_RESULT}" \
+                      --arg     push_apt_outcome    "${PUSH_APT_RESULT}" \
+                      --argjson dnf_backups         "${dnf_backups}" \
+                      --argjson apt_backups         "${apt_backups}" \
+                      '{run_id:$run_id, run_attempt:$run_attempt,
+                        repo:$repo, tag:$tag, simulated:$simulated,
+                        commit_sha:$commit_sha,
+                        component_name:$component_name,
+                        component_version:$component_version,
+                        component_buildnum:$component_buildnum,
+                        kb_db_release_tag:$kb_db_release_tag,
+                        repo_type:$repo_type,
+                        timestamps:{dnf:$dnf_timestamp, apt:$apt_timestamp},
+                        push_results:{dnf:$push_dnf_outcome, apt:$push_apt_outcome},
+                        backups:{dnf:$dnf_backups, apt:$apt_backups}}' \
+                      > aggregated/manifest.json
+                  cat aggregated/manifest.json
+
+            - name: Write step summary
+              run: |
+                  set -euo pipefail
+                  {
+                      echo "## Run \`${GITHUB_RUN_ID}\` attempt ${GITHUB_RUN_ATTEMPT}"
+                      echo ""
+                      jq -r '
+                          "**Tag:** `\(.tag)`" + (if .simulated then " *(simulated)*" else "" end) + "  ",
+                          "**Repo type:** `\(.repo_type)`  ",
+                          "**Component:** `\(.component_name) \(.component_version)-\(.component_buildnum)`  ",
+                          "**KB DB:** `\(.kb_db_release_tag)`  ",
+                          "**Push results:** dnf=`\(.push_results.dnf)`, apt=`\(.push_results.apt)`  ",
+                          "**Timestamps:** dnf=`\(.timestamps.dnf // "—")`, apt=`\(.timestamps.apt // "—")`"
+                      ' aggregated/manifest.json
+                      echo ""
+                      echo "### Backup paths (DNF)"
+                      jq -r '.backups.dnf[]? | "- `" + . + "`"' aggregated/manifest.json
+                      if [ "$(jq -r '.backups.dnf | length' aggregated/manifest.json)" = "0" ]; then
+                          echo "_(none — push-dnf skipped or no packages)_"
+                      fi
+                      echo ""
+                      echo "### Backup paths (APT)"
+                      jq -r '.backups.apt[]? | "- `" + . + "`"' aggregated/manifest.json
+                      if [ "$(jq -r '.backups.apt | length' aggregated/manifest.json)" = "0" ]; then
+                          echo "_(none — push-apt skipped or no packages)_"
+                      fi
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Upload aggregated manifest to S3
+              # Skipped on simulate_tag — the manifest still lands as a
+              # workflow artifact below for inspection.
+              if: github.ref_type == 'tag'
+              env:
+                  AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET:      ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE:             ${{ needs.determine-repo-type.outputs.repo-type }}
+                  CV:                    ${{ needs.determine-repo-type.outputs.component-version }}
+              run: |
+                  set -euo pipefail
+                  # Path mirrors the per-package backup scheme so the bucket
+                  # is browsable by repo-type → component → version → run.
+                  # e.g. _runs/daily/pgedge-ai-kb/1.0.0/26286392903-r1.json
+                  key="_runs/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${GITHUB_RUN_ID}-r${GITHUB_RUN_ATTEMPT}.json"
+                  # Send aws cp output through a filter that strips the
+                  # bucket name; GitHub's secret-masking covers the workflow
+                  # log but the bucket value should never appear in raw
+                  # stdout that a sidecar tool might consume.
+                  aws s3 cp aggregated/manifest.json "s3://${S3_BACKUP_BUCKET}/${key}" \
+                      | sed "s|${S3_BACKUP_BUCKET}|<backup-bucket>|g"
+                  echo "Aggregated manifest uploaded (key=${key})"
+
+            - name: Upload aggregated manifest as workflow artifact
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: aggregated-manifest
+                  path: aggregated/manifest.json
                   retention-days: 90
+
+    # -------------------------------------------------------------------------
+    # Slack notification — runs last, summarizing the whole release.
+    # -------------------------------------------------------------------------
+
+    notify-slack:
+        name: Notify Slack
+        needs:
+            - determine-repo-type
+            - validate-kb-db
+            - push-dnf
+            - push-apt
+            - publish-manifest
+        # Notify whenever we got past tag detection. If determine-repo-type
+        # was skipped (workflow_dispatch with no simulate_tag), nothing
+        # meaningful happened so we stay quiet.
+        if: always() && needs.determine-repo-type.result != 'skipped'
+        runs-on: ubuntu-latest
+        env:
+            COMPONENT_NAME: ${{ github.event.repository.name }}
+        steps:
+            - name: Gate on webhook presence
+              id: gate
+              env:
+                  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_URL }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+                      echo "::warning::SLACK_CHANNEL_URL secret not set — skipping notification"
+                      echo "skip=true" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "skip=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Download aggregated manifest
+              if: steps.gate.outputs.skip != 'true' && needs.publish-manifest.result == 'success'
+              continue-on-error: true
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: aggregated-manifest
+                  path: aggregated/
+
+            - name: Send Slack notification
+              if: steps.gate.outputs.skip != 'true'
+              env:
+                  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_URL }}
+                  EFFECTIVE_TAG:    ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  SIMULATED:        ${{ needs.determine-repo-type.outputs.simulated }}
+                  REPO_TYPE:        ${{ needs.determine-repo-type.outputs.repo-type }}
+                  CV:               ${{ needs.determine-repo-type.outputs.component-version }}
+                  CBN:              ${{ needs.determine-repo-type.outputs.component-buildnum }}
+                  KB_TAG:           ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+                  DETERMINE_RESULT: ${{ needs.determine-repo-type.result }}
+                  VALIDATE_RESULT:  ${{ needs.validate-kb-db.result }}
+                  PUSH_DNF_RESULT:  ${{ needs.push-dnf.result }}
+                  PUSH_APT_RESULT:  ${{ needs.push-apt.result }}
+                  PUBLISH_RESULT:   ${{ needs.publish-manifest.result }}
+                  ACTOR:            ${{ github.actor }}
+                  RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  COMMIT_SHA:       ${{ github.sha }}
+                  REPO_URL:         ${{ github.server_url }}/${{ github.repository }}
+              run: |
+                  set -euo pipefail
+
+                  # ----- overall status / color -----
+                  # Branch testing (simulate_tag) is always shown as
+                  # "Simulated" regardless of inner results; otherwise we
+                  # compose status from the two push outcomes since those
+                  # are the user-visible "did the release publish" signal.
+                  if [ "${SIMULATED}" = "true" ]; then
+                      emoji=":test_tube:"; status="Simulated"; color="#36A3E7"
+                  elif [ "${PUSH_DNF_RESULT}" = "success" ] \
+                       && [ "${PUSH_APT_RESULT}" = "success" ]; then
+                      emoji=":white_check_mark:"; status="Success"; color="#2EB67D"
+                  elif [ "${PUSH_DNF_RESULT}" = "failure" ] \
+                       || [ "${PUSH_APT_RESULT}" = "failure" ]; then
+                      if [ "${PUSH_DNF_RESULT}" = "success" ] \
+                         || [ "${PUSH_APT_RESULT}" = "success" ]; then
+                          emoji=":warning:"; status="Partial"; color="#ECB22E"
+                      else
+                          emoji=":x:"; status="Failed"; color="#E01E5A"
+                      fi
+                  elif [ "${PUSH_DNF_RESULT}" = "skipped" ] \
+                       && [ "${PUSH_APT_RESULT}" = "skipped" ]; then
+                      # Push jobs gated off — usually means an upstream
+                      # failure (build/validate) on a real tag push.
+                      emoji=":no_entry:"; status="Skipped"; color="#888888"
+                  else
+                      emoji=":grey_question:"; status="Mixed"; color="#888888"
+                  fi
+
+                  # ----- backup paths (relative — no bucket in manifest) -----
+                  if [ -f aggregated/manifest.json ]; then
+                      dnf_arr="$(jq -c '.backups.dnf // []' aggregated/manifest.json)"
+                      apt_arr="$(jq -c '.backups.apt // []' aggregated/manifest.json)"
+                  else
+                      dnf_arr='[]'
+                      apt_arr='[]'
+                  fi
+
+                  # ----- human timestamps -----
+                  # Slack's <!date^…> renders per-viewer-locale; the fallback
+                  # is what users see if Slack can't compute it.
+                  unix_ts="$(date -u +%s)"
+                  fallback_ts="$(date -u +'%Y-%m-%d %H:%M UTC')"
+
+                  # ----- short commit SHA for footer -----
+                  short_sha="${COMMIT_SHA:0:7}"
+
+                  tag_display="${EFFECTIVE_TAG}"
+                  [ "${SIMULATED}" = "true" ] && tag_display="${EFFECTIVE_TAG} (simulated)"
+
+                  # ----- assemble Block Kit payload -----
+                  # Backup-path sections are only appended if non-empty so a
+                  # failed/skipped push doesn't leave an awkward empty code
+                  # block in the notification.
+                  payload="$(jq -n \
+                      --arg     emoji        "${emoji}" \
+                      --arg     status       "${status}" \
+                      --arg     color        "${color}" \
+                      --arg     component    "${COMPONENT_NAME}" \
+                      --arg     tag          "${tag_display}" \
+                      --arg     repo_type    "${REPO_TYPE}" \
+                      --arg     version      "${CV}-${CBN}" \
+                      --arg     kb_tag       "${KB_TAG:-—}" \
+                      --arg     actor        "${ACTOR}" \
+                      --arg     unix_ts      "${unix_ts}" \
+                      --arg     fallback_ts  "${fallback_ts}" \
+                      --arg     dnf_result   "${PUSH_DNF_RESULT}" \
+                      --arg     apt_result   "${PUSH_APT_RESULT}" \
+                      --arg     run_url      "${RUN_URL}" \
+                      --arg     repo_url     "${REPO_URL}" \
+                      --arg     short_sha    "${short_sha}" \
+                      --argjson dnf_paths    "${dnf_arr}" \
+                      --argjson apt_paths    "${apt_arr}" \
+                      '
+                      def code_section(title; lines):
+                          if (lines | length) > 0 then
+                              [{
+                                  type: "section",
+                                  text: {
+                                      type: "mrkdwn",
+                                      text: ("*" + title + "*\n```\n"
+                                          + (lines | join("\n")) + "\n```")
+                                  }
+                              }]
+                          else [] end;
+
+                      {
+                          attachments: [{
+                              color: $color,
+                              blocks: (
+                                  [
+                                      {
+                                          type: "header",
+                                          text: {
+                                              type: "plain_text",
+                                              text: ($emoji + "  " + $component
+                                                  + " — " + $status),
+                                              emoji: true
+                                          }
+                                      },
+                                      {
+                                          type: "section",
+                                          fields: [
+                                              {type: "mrkdwn",
+                                               text: ("*Tag*\n`" + $tag + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Channel*\n`"
+                                                   + $repo_type + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Version*\n`"
+                                                   + $version + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*KB DB*\n`"
+                                                   + $kb_tag + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Triggered by*\n"
+                                                   + $actor)},
+                                              {type: "mrkdwn",
+                                               text: ("*When*\n<!date^"
+                                                   + $unix_ts
+                                                   + "^{date_short_pretty} at {time}|"
+                                                   + $fallback_ts + ">")}
+                                          ]
+                                      },
+                                      {type: "divider"},
+                                      {
+                                          type: "section",
+                                          fields: [
+                                              {type: "mrkdwn",
+                                               text: ("*Push DNF*\n`"
+                                                   + $dnf_result + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Push APT*\n`"
+                                                   + $apt_result + "`")}
+                                          ]
+                                      }
+                                  ]
+                                  + code_section("DNF backup paths"; $dnf_paths)
+                                  + code_section("APT backup paths"; $apt_paths)
+                                  + [
+                                      {type: "divider"},
+                                      {
+                                          type: "actions",
+                                          elements: [{
+                                              type: "button",
+                                              style: "primary",
+                                              text: {
+                                                  type: "plain_text",
+                                                  text: "View workflow run",
+                                                  emoji: true
+                                              },
+                                              url: $run_url
+                                          }]
+                                      },
+                                      {
+                                          type: "context",
+                                          elements: [{
+                                              type: "mrkdwn",
+                                              text: ("<" + $repo_url
+                                                  + "/commit/" + $short_sha
+                                                  + "|`" + $short_sha
+                                                  + "`>  •  pgEdge release pipeline")
+                                          }]
+                                      }
+                                  ]
+                              )
+                          }]
+                      }')"
+
+                  # ----- POST to webhook -----
+                  http_code="$(curl -sS -o /tmp/slack-resp.txt -w '%{http_code}' \
+                      -X POST -H 'Content-Type: application/json' \
+                      --data-binary "${payload}" \
+                      "${SLACK_WEBHOOK_URL}")"
+                  if [ "${http_code}" != "200" ]; then
+                      echo "::error::Slack webhook returned HTTP ${http_code}"
+                      cat /tmp/slack-resp.txt || true
+                      exit 1
+                  fi
+                  echo "Slack notification sent (HTTP ${http_code})"
