@@ -17,10 +17,8 @@ override_dh_auto_install:
 		debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
 
 	# --- Knowledge base database ---
-	# Path is stable so the pgedge-postgres-mcp server's default config
-	# keeps working after the package rename.
 	install -D -m 644 kb.db \
-		debian/pgedge-ai-kb/usr/share/pgedge/postgres-mcp-kb/kb.db
+		debian/pgedge-ai-kb/usr/share/pgedge/pgedge-ai-kb/kb.db
 
 	# --- Documentation ---
 	install -D -m 644 LICENSE.md \

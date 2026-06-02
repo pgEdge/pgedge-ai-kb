@@ -52,14 +52,12 @@ gpg --armor --detach-sign --default-key "$KEY_ID" \
     %{_builddir}/%{sname}-sbom.json || exit 1
 
 %install
-install -d %{buildroot}%{_datadir}/pgedge/postgres-mcp-kb
+install -d %{buildroot}%{_datadir}/pgedge/pgedge-ai-kb
 install -d %{buildroot}%{_datadir}
 install -d %{buildroot}%{_defaultdocdir}/%{sname}
 
-# Knowledge base database — path is stable so the pgedge-postgres-mcp
-# server's default config keeps working after the package rename.
 install -m 644 %{SOURCE0} \
-    %{buildroot}%{_datadir}/pgedge/postgres-mcp-kb/kb.db
+    %{buildroot}%{_datadir}/pgedge/pgedge-ai-kb/kb.db
 
 # Documentation
 install -m 644 %{SOURCE1} \
@@ -87,7 +85,7 @@ install -p -m 644 %{_builddir}/%{sname}-sbom.json.asc \
 %license %{_defaultdocdir}/%{sname}/LICENSE.md
 %doc %{_defaultdocdir}/%{sname}/README.md
 %doc %{_defaultdocdir}/%{sname}/VERSION
-%{_datadir}/pgedge/postgres-mcp-kb/kb.db
+%{_datadir}/pgedge/pgedge-ai-kb/kb.db
 %{_datadir}/%{sname}-sbom.json
 %{_datadir}/%{sname}-sbom.json.asc
 
