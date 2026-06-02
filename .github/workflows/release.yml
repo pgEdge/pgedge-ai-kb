@@ -973,19 +973,24 @@ jobs:
                   PUSH_APT_RESULT:  ${{ needs.push-apt.result }}
                   DNF_TS:           ${{ needs.push-dnf.outputs.timestamp }}
                   APT_TS:           ${{ needs.push-apt.outputs.timestamp }}
-                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
               run: |
                   set -euo pipefail
                   mkdir -p aggregated
 
                   # Reconstruct backup paths from each push job's timestamp.
+                  # Paths are bucket-relative on purpose — the bucket name
+                  # is a deployment secret and must not appear in the
+                  # manifest artifact (which is retained for 90 days and
+                  # uploaded to S3 for the promotion tool). Consumers
+                  # resolve the bucket from their own config.
+                  #
                   # We unconditionally list every matrix target — under
                   # force_push partial failure, a listed prefix may be empty
                   # in S3 and the promoter handles that via `aws s3 ls`.
                   dnf_backups='[]'
                   if [ -n "${DNF_TS}" ]; then
                       for os in 9 10; do
-                          path="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
+                          path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
                           dnf_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${dnf_backups}")"
                       done
                   fi
@@ -993,7 +998,7 @@ jobs:
                   apt_backups='[]'
                   if [ -n "${APT_TS}" ]; then
                       for distro in jammy noble bullseye bookworm trixie; do
-                          path="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
+                          path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
                           apt_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${apt_backups}")"
                       done
                   fi
@@ -1074,8 +1079,13 @@ jobs:
                   # is browsable by repo-type → component → version → run.
                   # e.g. _runs/daily/pgedge-ai-kb/1.0.0/26286392903-r1.json
                   key="_runs/${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${GITHUB_RUN_ID}-r${GITHUB_RUN_ATTEMPT}.json"
-                  aws s3 cp aggregated/manifest.json "s3://${S3_BACKUP_BUCKET}/${key}"
-                  echo "Aggregated manifest uploaded to s3://${S3_BACKUP_BUCKET}/${key}"
+                  # Send aws cp output through a filter that strips the
+                  # bucket name; GitHub's secret-masking covers the workflow
+                  # log but the bucket value should never appear in raw
+                  # stdout that a sidecar tool might consume.
+                  aws s3 cp aggregated/manifest.json "s3://${S3_BACKUP_BUCKET}/${key}" \
+                      | sed "s|${S3_BACKUP_BUCKET}|<backup-bucket>|g"
+                  echo "Aggregated manifest uploaded (key=${key})"
 
             - name: Upload aggregated manifest as workflow artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1083,3 +1093,245 @@ jobs:
                   name: aggregated-manifest
                   path: aggregated/manifest.json
                   retention-days: 90
+
+    # -------------------------------------------------------------------------
+    # Slack notification — runs last, summarizing the whole release.
+    # -------------------------------------------------------------------------
+
+    notify-slack:
+        name: Notify Slack
+        needs:
+            - determine-repo-type
+            - validate-kb-db
+            - push-dnf
+            - push-apt
+            - publish-manifest
+        # Notify whenever we got past tag detection. If determine-repo-type
+        # was skipped (workflow_dispatch with no simulate_tag), nothing
+        # meaningful happened so we stay quiet.
+        if: always() && needs.determine-repo-type.result != 'skipped'
+        runs-on: ubuntu-latest
+        env:
+            COMPONENT_NAME: ${{ github.event.repository.name }}
+        steps:
+            - name: Gate on webhook presence
+              id: gate
+              env:
+                  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_URL }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+                      echo "::warning::SLACK_CHANNEL_URL secret not set — skipping notification"
+                      echo "skip=true" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "skip=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Download aggregated manifest
+              if: steps.gate.outputs.skip != 'true' && needs.publish-manifest.result == 'success'
+              continue-on-error: true
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: aggregated-manifest
+                  path: aggregated/
+
+            - name: Send Slack notification
+              if: steps.gate.outputs.skip != 'true'
+              env:
+                  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CHANNEL_URL }}
+                  EFFECTIVE_TAG:    ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  SIMULATED:        ${{ needs.determine-repo-type.outputs.simulated }}
+                  REPO_TYPE:        ${{ needs.determine-repo-type.outputs.repo-type }}
+                  CV:               ${{ needs.determine-repo-type.outputs.component-version }}
+                  CBN:              ${{ needs.determine-repo-type.outputs.component-buildnum }}
+                  KB_TAG:           ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+                  DETERMINE_RESULT: ${{ needs.determine-repo-type.result }}
+                  VALIDATE_RESULT:  ${{ needs.validate-kb-db.result }}
+                  PUSH_DNF_RESULT:  ${{ needs.push-dnf.result }}
+                  PUSH_APT_RESULT:  ${{ needs.push-apt.result }}
+                  PUBLISH_RESULT:   ${{ needs.publish-manifest.result }}
+                  ACTOR:            ${{ github.actor }}
+                  RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  COMMIT_SHA:       ${{ github.sha }}
+                  REPO_URL:         ${{ github.server_url }}/${{ github.repository }}
+              run: |
+                  set -euo pipefail
+
+                  # ----- overall status / color -----
+                  # Branch testing (simulate_tag) is always shown as
+                  # "Simulated" regardless of inner results; otherwise we
+                  # compose status from the two push outcomes since those
+                  # are the user-visible "did the release publish" signal.
+                  if [ "${SIMULATED}" = "true" ]; then
+                      emoji=":test_tube:"; status="Simulated"; color="#36A3E7"
+                  elif [ "${PUSH_DNF_RESULT}" = "success" ] \
+                       && [ "${PUSH_APT_RESULT}" = "success" ]; then
+                      emoji=":white_check_mark:"; status="Success"; color="#2EB67D"
+                  elif [ "${PUSH_DNF_RESULT}" = "failure" ] \
+                       || [ "${PUSH_APT_RESULT}" = "failure" ]; then
+                      if [ "${PUSH_DNF_RESULT}" = "success" ] \
+                         || [ "${PUSH_APT_RESULT}" = "success" ]; then
+                          emoji=":warning:"; status="Partial"; color="#ECB22E"
+                      else
+                          emoji=":x:"; status="Failed"; color="#E01E5A"
+                      fi
+                  elif [ "${PUSH_DNF_RESULT}" = "skipped" ] \
+                       && [ "${PUSH_APT_RESULT}" = "skipped" ]; then
+                      # Push jobs gated off — usually means an upstream
+                      # failure (build/validate) on a real tag push.
+                      emoji=":no_entry:"; status="Skipped"; color="#888888"
+                  else
+                      emoji=":grey_question:"; status="Mixed"; color="#888888"
+                  fi
+
+                  # ----- backup paths (relative — no bucket in manifest) -----
+                  if [ -f aggregated/manifest.json ]; then
+                      dnf_arr="$(jq -c '.backups.dnf // []' aggregated/manifest.json)"
+                      apt_arr="$(jq -c '.backups.apt // []' aggregated/manifest.json)"
+                  else
+                      dnf_arr='[]'
+                      apt_arr='[]'
+                  fi
+
+                  # ----- human timestamps -----
+                  # Slack's <!date^…> renders per-viewer-locale; the fallback
+                  # is what users see if Slack can't compute it.
+                  unix_ts="$(date -u +%s)"
+                  fallback_ts="$(date -u +'%Y-%m-%d %H:%M UTC')"
+
+                  # ----- short commit SHA for footer -----
+                  short_sha="${COMMIT_SHA:0:7}"
+
+                  tag_display="${EFFECTIVE_TAG}"
+                  [ "${SIMULATED}" = "true" ] && tag_display="${EFFECTIVE_TAG} (simulated)"
+
+                  # ----- assemble Block Kit payload -----
+                  # Backup-path sections are only appended if non-empty so a
+                  # failed/skipped push doesn't leave an awkward empty code
+                  # block in the notification.
+                  payload="$(jq -n \
+                      --arg     emoji        "${emoji}" \
+                      --arg     status       "${status}" \
+                      --arg     color        "${color}" \
+                      --arg     component    "${COMPONENT_NAME}" \
+                      --arg     tag          "${tag_display}" \
+                      --arg     repo_type    "${REPO_TYPE}" \
+                      --arg     version      "${CV}-${CBN}" \
+                      --arg     kb_tag       "${KB_TAG:-—}" \
+                      --arg     actor        "${ACTOR}" \
+                      --arg     unix_ts      "${unix_ts}" \
+                      --arg     fallback_ts  "${fallback_ts}" \
+                      --arg     dnf_result   "${PUSH_DNF_RESULT}" \
+                      --arg     apt_result   "${PUSH_APT_RESULT}" \
+                      --arg     run_url      "${RUN_URL}" \
+                      --arg     repo_url     "${REPO_URL}" \
+                      --arg     short_sha    "${short_sha}" \
+                      --argjson dnf_paths    "${dnf_arr}" \
+                      --argjson apt_paths    "${apt_arr}" \
+                      '
+                      def code_section(title; lines):
+                          if (lines | length) > 0 then
+                              [{
+                                  type: "section",
+                                  text: {
+                                      type: "mrkdwn",
+                                      text: ("*" + title + "*\n```\n"
+                                          + (lines | join("\n")) + "\n```")
+                                  }
+                              }]
+                          else [] end;
+
+                      {
+                          attachments: [{
+                              color: $color,
+                              blocks: (
+                                  [
+                                      {
+                                          type: "header",
+                                          text: {
+                                              type: "plain_text",
+                                              text: ($emoji + "  " + $component
+                                                  + " — " + $status),
+                                              emoji: true
+                                          }
+                                      },
+                                      {
+                                          type: "section",
+                                          fields: [
+                                              {type: "mrkdwn",
+                                               text: ("*Tag*\n`" + $tag + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Channel*\n`"
+                                                   + $repo_type + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Version*\n`"
+                                                   + $version + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*KB DB*\n`"
+                                                   + $kb_tag + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Triggered by*\n"
+                                                   + $actor)},
+                                              {type: "mrkdwn",
+                                               text: ("*When*\n<!date^"
+                                                   + $unix_ts
+                                                   + "^{date_short_pretty} at {time}|"
+                                                   + $fallback_ts + ">")}
+                                          ]
+                                      },
+                                      {type: "divider"},
+                                      {
+                                          type: "section",
+                                          fields: [
+                                              {type: "mrkdwn",
+                                               text: ("*Push DNF*\n`"
+                                                   + $dnf_result + "`")},
+                                              {type: "mrkdwn",
+                                               text: ("*Push APT*\n`"
+                                                   + $apt_result + "`")}
+                                          ]
+                                      }
+                                  ]
+                                  + code_section("DNF backup paths"; $dnf_paths)
+                                  + code_section("APT backup paths"; $apt_paths)
+                                  + [
+                                      {type: "divider"},
+                                      {
+                                          type: "actions",
+                                          elements: [{
+                                              type: "button",
+                                              style: "primary",
+                                              text: {
+                                                  type: "plain_text",
+                                                  text: "View workflow run",
+                                                  emoji: true
+                                              },
+                                              url: $run_url
+                                          }]
+                                      },
+                                      {
+                                          type: "context",
+                                          elements: [{
+                                              type: "mrkdwn",
+                                              text: ("<" + $repo_url
+                                                  + "/commit/" + $short_sha
+                                                  + "|`" + $short_sha
+                                                  + "`>  •  pgEdge release pipeline")
+                                          }]
+                                      }
+                                  ]
+                              )
+                          }]
+                      }')"
+
+                  # ----- POST to webhook -----
+                  http_code="$(curl -sS -o /tmp/slack-resp.txt -w '%{http_code}' \
+                      -X POST -H 'Content-Type: application/json' \
+                      --data-binary "${payload}" \
+                      "${SLACK_WEBHOOK_URL}")"
+                  if [ "${http_code}" != "200" ]; then
+                      echo "::error::Slack webhook returned HTTP ${http_code}"
+                      cat /tmp/slack-resp.txt || true
+                      exit 1
+                  fi
+                  echo "Slack notification sent (HTTP ${http_code})"
