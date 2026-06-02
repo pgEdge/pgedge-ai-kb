@@ -2,8 +2,15 @@
 
 install_syft(){
 
-  echo "Installing syft ..."
-  curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+  # Pinned for reproducibility and supply-chain safety. Anchore keeps
+  # both the install.sh script and the release binaries on GitHub
+  # Releases indefinitely, so this pin won't bit-rot. Refresh
+  # SYFT_VERSION periodically (release cadence is roughly monthly) to
+  # pull in CVE fixes and SBOM-format improvements.
+  local SYFT_VERSION="v1.44.0"
+  echo "Installing syft ${SYFT_VERSION} ..."
+  curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
+    | sudo sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
 }
 
 setup_dnf_build_env(){

@@ -334,15 +334,24 @@ jobs:
               env:
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
               run: |
-                  cp examples/pgedge-ai-kb-builder.yaml examples/pgedge-ai-kb-builder-build.yaml
-                  sed -i '' 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' examples/pgedge-ai-kb-builder-build.yaml
-                  sed -i '' "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" examples/pgedge-ai-kb-builder-build.yaml
-                  sed -i '' "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" examples/pgedge-ai-kb-builder-build.yaml
-                  sed -i '' 's|git@github.com:|https://github.com/|g' examples/pgedge-ai-kb-builder-build.yaml
-                  grep -q 'database_path: "bin/kb.db"' examples/pgedge-ai-kb-builder-build.yaml || { echo "database_path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "OpenAI key path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "Voyage key path replacement failed"; exit 1; }
-                  grep -q 'https://github.com/' examples/pgedge-ai-kb-builder-build.yaml || { echo "SSH URL replacement failed"; exit 1; }
+                  set -euo pipefail
+                  cfg=examples/pgedge-ai-kb-builder-build.yaml
+                  cp examples/pgedge-ai-kb-builder.yaml "${cfg}"
+                  # Single sed invocation with multiple -e expressions, then
+                  # write-to-temp + mv. Avoids `sed -i ''` (BSD-only) and
+                  # `sed -i` (GNU-only); this form works on both since the
+                  # self-hosted runner OS isn't pinned here.
+                  sed \
+                      -e 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' \
+                      -e "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" \
+                      -e "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" \
+                      -e 's|git@github.com:|https://github.com/|g' \
+                      "${cfg}" > "${cfg}.new"
+                  mv "${cfg}.new" "${cfg}"
+                  grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "database_path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" "${cfg}" || { echo "OpenAI key path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" "${cfg}" || { echo "Voyage key path replacement failed"; exit 1; }
+                  grep -q 'https://github.com/' "${cfg}" || { echo "SSH URL replacement failed"; exit 1; }
 
             - name: Generate kb.db (capturing log for coverage check)
               env:

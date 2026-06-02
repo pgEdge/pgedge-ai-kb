@@ -45,8 +45,13 @@ prepare() {
         echo "::warning::RELEASE_TAG file missing alongside kb.db"
     fi
 
-    echo "Setting up source directory at ${SRC_DIR}..."
-    rm -rf "${SRC_DIR}"
+    # Clear the entire build workspace, not just SRC_DIR. dpkg-buildpackage
+    # drops .deb files directly under BUILD_DIR (the parent of the source
+    # tree); if a previous run left .debs there, post_build() would copy
+    # those stale artifacts to /output. In CI each container is fresh so
+    # this is defensive, but local reruns hit it.
+    echo "Resetting build workspace at ${BUILD_DIR}..."
+    rm -rf "${BUILD_DIR}"
     mkdir -p "${SRC_DIR}"
 
     echo "Staging kb.db..."
