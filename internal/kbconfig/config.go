@@ -15,8 +15,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Default embedding request timeouts. RequestTimeout is the overall
+// ceiling for one embedding request including all retries;
+// PerAttemptTimeout bounds each individual HTTP attempt so a stalled
+// attempt is retried rather than fatally cancelling the request. The
+// per-attempt value sits below the overall ceiling to leave room for
+// retries; Gemini's heavy batchEmbedContents motivated these defaults.
+const (
+	defaultRequestTimeout    = "10m"
+	defaultPerAttemptTimeout = "90s"
 )
 
 // Config represents the kb-builder configuration
@@ -56,6 +68,19 @@ type EmbeddingConfig struct {
 	Voyage VoyageConfig `yaml:"voyage"`
 	Ollama OllamaConfig `yaml:"ollama"`
 	Gemini GeminiConfig `yaml:"gemini"`
+
+	// RequestTimeout is the overall wall-clock ceiling for one embedding
+	// request, including all retries (e.g. "10m"). PerAttemptTimeout
+	// bounds each individual HTTP attempt (e.g. "90s"); a stalled attempt
+	// is retried rather than cancelling the whole request. Set
+	// PerAttemptTimeout below RequestTimeout to leave room for retries.
+	RequestTimeout    string `yaml:"request_timeout,omitempty"`
+	PerAttemptTimeout string `yaml:"per_attempt_timeout,omitempty"`
+
+	// Parsed forms of the timeouts above. Populated at load time, not
+	// from YAML.
+	RequestTimeoutDuration    time.Duration `yaml:"-"`
+	PerAttemptTimeoutDuration time.Duration `yaml:"-"`
 }
 
 // OpenAIConfig contains OpenAI embedding configuration
@@ -199,6 +224,26 @@ func applyDefaults(config *Config, configPath string) error {
 		}
 	}
 
+	// Default embedding request timeouts and parse them into durations.
+	if config.Embeddings.RequestTimeout == "" {
+		config.Embeddings.RequestTimeout = defaultRequestTimeout
+	}
+	if config.Embeddings.PerAttemptTimeout == "" {
+		config.Embeddings.PerAttemptTimeout = defaultPerAttemptTimeout
+	}
+	reqTimeout, err := time.ParseDuration(config.Embeddings.RequestTimeout)
+	if err != nil {
+		return fmt.Errorf("invalid request_timeout %q: %w",
+			config.Embeddings.RequestTimeout, err)
+	}
+	attemptTimeout, err := time.ParseDuration(config.Embeddings.PerAttemptTimeout)
+	if err != nil {
+		return fmt.Errorf("invalid per_attempt_timeout %q: %w",
+			config.Embeddings.PerAttemptTimeout, err)
+	}
+	config.Embeddings.RequestTimeoutDuration = reqTimeout
+	config.Embeddings.PerAttemptTimeoutDuration = attemptTimeout
+
 	// Expand paths with ~
 	config.DatabasePath = expandPath(config.DatabasePath)
 	config.DocSourcePath = expandPath(config.DocSourcePath)
@@ -249,6 +294,24 @@ func validate(config *Config) error {
 		!config.Embeddings.Ollama.Enabled &&
 		!config.Embeddings.Gemini.Enabled {
 		return fmt.Errorf("at least one embedding provider must be enabled")
+	}
+
+	// Both timeouts must be positive, and the per-attempt ceiling must
+	// sit below the overall ceiling so retries have room to run.
+	if config.Embeddings.RequestTimeoutDuration <= 0 {
+		return fmt.Errorf("request_timeout must be positive, got %q",
+			config.Embeddings.RequestTimeout)
+	}
+	if config.Embeddings.PerAttemptTimeoutDuration <= 0 {
+		return fmt.Errorf("per_attempt_timeout must be positive, got %q",
+			config.Embeddings.PerAttemptTimeout)
+	}
+	if config.Embeddings.PerAttemptTimeoutDuration >=
+		config.Embeddings.RequestTimeoutDuration {
+		return fmt.Errorf(
+			"per_attempt_timeout (%s) must be less than request_timeout (%s)",
+			config.Embeddings.PerAttemptTimeout,
+			config.Embeddings.RequestTimeout)
 	}
 
 	return nil

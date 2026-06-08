@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The builder now bounds embedding requests with two configurable
+  timeouts, `request_timeout` (overall ceiling including retries) and
+  `per_attempt_timeout` (per HTTP attempt), under the `embeddings`
+  block. A stalled attempt is retried rather than cancelling the whole
+  request, which fixes Gemini batches silently dropping chunks when a
+  single slow `batchEmbedContents` call exhausted the timeout budget.
+  The values default to `10m` and `90s` respectively.
+
 - The pgEdge AI Knowledgebase Builder now supports Gemini as a fourth
   embedding provider; the default model is `gemini-embedding-001`.
   Configure it under the `embeddings.gemini` block in the YAML

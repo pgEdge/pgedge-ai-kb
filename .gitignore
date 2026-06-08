@@ -41,6 +41,7 @@ Thumbs.db
 .claude/settings.local.json
 .claude/specs/
 .claude/plans/
+.claude/worktrees/
 
 # Docs
 site/

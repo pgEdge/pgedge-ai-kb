@@ -145,6 +145,33 @@ Context-length errors from Ollama are detected immediately and never
 retried; the builder truncates oversized text progressively or skips
 the offending chunk.
 
+## Request Timeouts
+
+The builder bounds embedding requests with two timeouts under the
+`embeddings` section. The `request_timeout` value is the overall
+wall-clock ceiling for one request, including every retry; the
+`per_attempt_timeout` value bounds each individual HTTP attempt. A
+stalled attempt that exceeds `per_attempt_timeout` is retried rather
+than cancelling the whole request, so a single slow batch no longer
+exhausts the retry budget. This matters for providers that embed large
+batches in one call, such as Gemini.
+
+In the following example, the `embeddings` section raises the overall
+ceiling and bounds each attempt; both values accept Go duration strings
+such as `90s` or `10m`:
+
+```yaml
+embeddings:
+    request_timeout: "10m"
+    per_attempt_timeout: "90s"
+    openai:
+        enabled: true
+```
+
+The `request_timeout` value defaults to `10m` and `per_attempt_timeout`
+defaults to `90s`. The `per_attempt_timeout` value must remain below
+`request_timeout` so retries have room to run.
+
 ## Managing Existing Embeddings
 
 The builder includes two flags for working with embeddings on an
