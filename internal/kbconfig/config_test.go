@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -79,6 +80,66 @@ embeddings:
 	if cfg.Embeddings.OpenAI.APIKey != "test-api-key" {
 		t.Errorf("API key should be loaded, got '%s'", cfg.Embeddings.OpenAI.APIKey)
 	}
+
+	// Timeouts are unset in the config above, so the defaults apply and
+	// parse into durations.
+	if cfg.Embeddings.RequestTimeoutDuration != 10*time.Minute {
+		t.Errorf("Expected default request timeout 10m, got %s",
+			cfg.Embeddings.RequestTimeoutDuration)
+	}
+	if cfg.Embeddings.PerAttemptTimeoutDuration != 90*time.Second {
+		t.Errorf("Expected default per-attempt timeout 90s, got %s",
+			cfg.Embeddings.PerAttemptTimeoutDuration)
+	}
+}
+
+// TestLoadConfigTimeouts covers parsing of explicit timeout values and
+// rejection of an unparseable duration string.
+func TestLoadConfigTimeouts(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyPath := filepath.Join(tmpDir, "fake-key")
+	if err := os.WriteFile(keyPath, []byte("test-api-key"), 0600); err != nil {
+		t.Fatalf("Failed to write test key: %v", err)
+	}
+
+	header := `
+sources:
+  - local_path: "/tmp/test-docs"
+    project_name: "Test Project"
+embeddings:
+  openai:
+    enabled: true
+    api_key_file: "` + keyPath + `"
+`
+
+	t.Run("explicit values are parsed", func(t *testing.T) {
+		configPath := filepath.Join(tmpDir, "explicit.yaml")
+		content := header + "  request_timeout: \"5m\"\n  per_attempt_timeout: \"30s\"\n"
+		if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write config: %v", err)
+		}
+		cfg, err := Load(configPath)
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if cfg.Embeddings.RequestTimeoutDuration != 5*time.Minute {
+			t.Errorf("Expected 5m, got %s", cfg.Embeddings.RequestTimeoutDuration)
+		}
+		if cfg.Embeddings.PerAttemptTimeoutDuration != 30*time.Second {
+			t.Errorf("Expected 30s, got %s", cfg.Embeddings.PerAttemptTimeoutDuration)
+		}
+	})
+
+	t.Run("unparseable duration is rejected", func(t *testing.T) {
+		configPath := filepath.Join(tmpDir, "bad.yaml")
+		content := header + "  request_timeout: \"banana\"\n"
+		if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write config: %v", err)
+		}
+		if _, err := Load(configPath); err == nil {
+			t.Error("Expected error for unparseable request_timeout, got none")
+		}
+	})
 }
 
 func TestValidateConfig(t *testing.T) {
@@ -98,7 +159,9 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 				Embeddings: EmbeddingConfig{
-					OpenAI: OpenAIConfig{Enabled: true},
+					OpenAI:                    OpenAIConfig{Enabled: true},
+					RequestTimeoutDuration:    10 * time.Minute,
+					PerAttemptTimeoutDuration: 90 * time.Second,
 				},
 			},
 			shouldError: false,
@@ -114,7 +177,9 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 				Embeddings: EmbeddingConfig{
-					Gemini: GeminiConfig{Enabled: true},
+					Gemini:                    GeminiConfig{Enabled: true},
+					RequestTimeoutDuration:    10 * time.Minute,
+					PerAttemptTimeoutDuration: 90 * time.Second,
 				},
 			},
 			shouldError: false,
@@ -186,10 +251,49 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 				Embeddings: EmbeddingConfig{
-					OpenAI: OpenAIConfig{Enabled: true},
+					OpenAI:                    OpenAIConfig{Enabled: true},
+					RequestTimeoutDuration:    10 * time.Minute,
+					PerAttemptTimeoutDuration: 90 * time.Second,
 				},
 			},
 			shouldError: false,
+		},
+		{
+			name: "per_attempt_timeout not below request_timeout",
+			config: &Config{
+				Sources: []DocumentSource{
+					{
+						LocalPath:      "/tmp/test",
+						ProjectName:    "Test",
+						ProjectVersion: "1.0",
+					},
+				},
+				Embeddings: EmbeddingConfig{
+					OpenAI:                    OpenAIConfig{Enabled: true},
+					RequestTimeout:            "90s",
+					PerAttemptTimeout:         "90s",
+					RequestTimeoutDuration:    90 * time.Second,
+					PerAttemptTimeoutDuration: 90 * time.Second,
+				},
+			},
+			shouldError: true,
+		},
+		{
+			name: "non-positive request_timeout",
+			config: &Config{
+				Sources: []DocumentSource{
+					{
+						LocalPath:      "/tmp/test",
+						ProjectName:    "Test",
+						ProjectVersion: "1.0",
+					},
+				},
+				Embeddings: EmbeddingConfig{
+					OpenAI:                    OpenAIConfig{Enabled: true},
+					PerAttemptTimeoutDuration: 90 * time.Second,
+				},
+			},
+			shouldError: true,
 		},
 	}
 

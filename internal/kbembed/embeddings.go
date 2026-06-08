@@ -51,29 +51,34 @@ func NewEmbeddingGenerator(
 ) (*EmbeddingGenerator, error) {
 	clients := make(map[string]llm.Client)
 
+	to := timeouts{
+		request:    config.Embeddings.RequestTimeoutDuration,
+		perAttempt: config.Embeddings.PerAttemptTimeoutDuration,
+	}
+
 	if config.Embeddings.OpenAI.Enabled {
-		c, err := newOpenAIClient(config.Embeddings.OpenAI, maxRetries)
+		c, err := newOpenAIClient(config.Embeddings.OpenAI, maxRetries, to)
 		if err != nil {
 			return nil, fmt.Errorf("openai client: %w", err)
 		}
 		clients["openai"] = c
 	}
 	if config.Embeddings.Voyage.Enabled {
-		c, err := newVoyageClient(config.Embeddings.Voyage, maxRetries)
+		c, err := newVoyageClient(config.Embeddings.Voyage, maxRetries, to)
 		if err != nil {
 			return nil, fmt.Errorf("voyage client: %w", err)
 		}
 		clients["voyage"] = c
 	}
 	if config.Embeddings.Gemini.Enabled {
-		c, err := newGeminiClient(config.Embeddings.Gemini, maxRetries)
+		c, err := newGeminiClient(config.Embeddings.Gemini, maxRetries, to)
 		if err != nil {
 			return nil, fmt.Errorf("gemini client: %w", err)
 		}
 		clients["gemini"] = c
 	}
 	if config.Embeddings.Ollama.Enabled {
-		c, err := newOllamaClient(config.Embeddings.Ollama, maxRetries)
+		c, err := newOllamaClient(config.Embeddings.Ollama, maxRetries, to)
 		if err != nil {
 			return nil, fmt.Errorf("ollama client: %w", err)
 		}

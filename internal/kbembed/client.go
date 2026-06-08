@@ -42,6 +42,16 @@ func libRetry(maxRetries int) llm.RetryConfig {
 	}
 }
 
+// timeouts carries the embedding request timeouts shared by every
+// provider client. RequestTimeout is the overall ceiling for one
+// request including retries; PerAttemptTimeout bounds each HTTP attempt
+// so a stalled attempt (notably Gemini's heavy batchEmbedContents) is
+// retried rather than cancelling the whole request.
+type timeouts struct {
+	request    time.Duration
+	perAttempt time.Duration
+}
+
 // onRetryLogger returns an OnRetry hook that mimics the kb-builder's
 // historical "Retry N for X after Ys..." log lines.
 func onRetryLogger(label string) func(llm.RetryEvent) {
@@ -57,11 +67,13 @@ func onRetryLogger(label string) func(llm.RetryEvent) {
 }
 
 // newOpenAIClient builds an llm.Client configured for OpenAI embeddings.
-func newOpenAIClient(cfg kbconfig.OpenAIConfig, maxRetries int) (llm.Client, error) {
+func newOpenAIClient(cfg kbconfig.OpenAIConfig, maxRetries int, to timeouts) (llm.Client, error) {
 	return llm.NewClient("openai", llm.Options{
-		APIKey: cfg.APIKey,
-		Model:  cfg.Model,
-		Retry:  libRetry(maxRetries),
+		APIKey:            cfg.APIKey,
+		Model:             cfg.Model,
+		Retry:             libRetry(maxRetries),
+		RequestTimeout:    to.request,
+		PerAttemptTimeout: to.perAttempt,
 		Extensions: []llm.ProviderExtension{
 			openai.Extension{EmbeddingDimensions: cfg.Dimensions},
 		},
@@ -70,32 +82,38 @@ func newOpenAIClient(cfg kbconfig.OpenAIConfig, maxRetries int) (llm.Client, err
 }
 
 // newVoyageClient builds an llm.Client configured for Voyage embeddings.
-func newVoyageClient(cfg kbconfig.VoyageConfig, maxRetries int) (llm.Client, error) {
+func newVoyageClient(cfg kbconfig.VoyageConfig, maxRetries int, to timeouts) (llm.Client, error) {
 	return llm.NewClient("voyage", llm.Options{
-		APIKey:  cfg.APIKey,
-		Model:   cfg.Model,
-		Retry:   libRetry(maxRetries),
-		OnRetry: onRetryLogger("Voyage"),
+		APIKey:            cfg.APIKey,
+		Model:             cfg.Model,
+		Retry:             libRetry(maxRetries),
+		RequestTimeout:    to.request,
+		PerAttemptTimeout: to.perAttempt,
+		OnRetry:           onRetryLogger("Voyage"),
 	})
 }
 
 // newGeminiClient builds an llm.Client configured for Gemini embeddings.
-func newGeminiClient(cfg kbconfig.GeminiConfig, maxRetries int) (llm.Client, error) {
+func newGeminiClient(cfg kbconfig.GeminiConfig, maxRetries int, to timeouts) (llm.Client, error) {
 	return llm.NewClient("gemini", llm.Options{
-		APIKey:  cfg.APIKey,
-		Model:   cfg.Model,
-		Retry:   libRetry(maxRetries),
-		OnRetry: onRetryLogger("Gemini"),
+		APIKey:            cfg.APIKey,
+		Model:             cfg.Model,
+		Retry:             libRetry(maxRetries),
+		RequestTimeout:    to.request,
+		PerAttemptTimeout: to.perAttempt,
+		OnRetry:           onRetryLogger("Gemini"),
 	})
 }
 
 // newOllamaClient builds an llm.Client configured for Ollama embeddings,
 // with Authorization injected for Ollama Cloud when an API key is set.
-func newOllamaClient(cfg kbconfig.OllamaConfig, maxRetries int) (llm.Client, error) {
+func newOllamaClient(cfg kbconfig.OllamaConfig, maxRetries int, to timeouts) (llm.Client, error) {
 	opts := llm.Options{
-		BaseURL: cfg.Endpoint,
-		Model:   cfg.Model,
-		Retry:   libRetry(maxRetries),
+		BaseURL:           cfg.Endpoint,
+		Model:             cfg.Model,
+		Retry:             libRetry(maxRetries),
+		RequestTimeout:    to.request,
+		PerAttemptTimeout: to.perAttempt,
 		Extensions: []llm.ProviderExtension{
 			ollama.Extension{
 				EmbedContextLength:      cfg.ContextLength,

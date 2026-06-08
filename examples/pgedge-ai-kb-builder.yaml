@@ -433,6 +433,14 @@ sources:
 
 # Embedding provider configurations
 embeddings:
+    # Request timeouts shared by every provider. request_timeout is the
+    # overall ceiling for one embedding request including all retries;
+    # per_attempt_timeout bounds each HTTP attempt so a stalled attempt
+    # (such as a large Gemini batch) is retried instead of failing the
+    # whole request. per_attempt_timeout must stay below request_timeout.
+    request_timeout: "10m"          # Defaults to 10m
+    per_attempt_timeout: "90s"      # Defaults to 90s
+
     # OpenAI embeddings
     openai:
         enabled: true
