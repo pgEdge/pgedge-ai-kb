@@ -321,13 +321,16 @@ jobs:
               env:
                   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+                  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
               run: |
                   [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
                   [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
+                  [ -n "$GEMINI_API_KEY" ] || { echo "GEMINI_API_KEY secret is missing"; exit 1; }
                   mkdir -p "$API_KEYS_DIR"
                   printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
                   printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
+                  printf '%s' "$GEMINI_API_KEY" > "$API_KEYS_DIR/gemini-key"
                   chmod 600 "$API_KEYS_DIR"/*
 
             - name: Configure kb-builder for cloud providers
@@ -345,12 +348,14 @@ jobs:
                       -e 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' \
                       -e "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" \
                       -e "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" \
+                      -e "s|api_key_file: \"~/.gemini-api-key\"|api_key_file: \"${API_KEYS_DIR}/gemini-key\"|" \
                       -e 's|git@github.com:|https://github.com/|g' \
                       "${cfg}" > "${cfg}.new"
                   mv "${cfg}.new" "${cfg}"
                   grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "database_path replacement failed"; exit 1; }
                   grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" "${cfg}" || { echo "OpenAI key path replacement failed"; exit 1; }
                   grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" "${cfg}" || { echo "Voyage key path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/gemini-key\"" "${cfg}" || { echo "Gemini key path replacement failed"; exit 1; }
                   grep -q 'https://github.com/' "${cfg}" || { echo "SSH URL replacement failed"; exit 1; }
 
             - name: Generate kb.db (capturing log for coverage check)
@@ -369,10 +374,10 @@ jobs:
                   [ -f "bin/kb.db" ] || { echo "::error::bin/kb.db was not created"; exit 1; }
                   echo "kb.db size: $(du -sh bin/kb.db | cut -f1)"
 
-            - name: Verify per-provider coverage (OpenAI, Voyage, Ollama)
+            - name: Verify per-provider coverage (OpenAI, Voyage, Gemini, Ollama)
               # Each provider must log a "<Provider>: Processed N/M chunks"
               # line where the LAST such line shows N == M (every batch
-              # finished). Strict mode: all three providers must be present.
+              # finished). Strict mode: all four providers must be present.
               # If a provider is intentionally disabled in the config, this
               # check will fail — that's intentional per release policy.
               run: |
@@ -381,7 +386,7 @@ jobs:
                   [ -f "$log" ] || { echo "::error::kb-builder.log missing"; exit 1; }
 
                   fail=0
-                  for provider in OpenAI Voyage Ollama; do
+                  for provider in OpenAI Voyage Gemini Ollama; do
                       last=$(grep -E "^[[:space:]]*${provider}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
                       if [ -z "$last" ]; then
                           echo "::error::${provider}: no 'Processed X/Y chunks' lines in log (provider missing or disabled)"
@@ -541,7 +546,7 @@ jobs:
                   # check. (The strict per-provider coverage assertion lives
                   # in generate-kb-db; this is the basic sanity check that
                   # both inline and discovered kb.db files pass through.)
-                  for col in openai_embedding voyage_embedding ollama_embedding; do
+                  for col in openai_embedding voyage_embedding gemini_embedding ollama_embedding; do
                       dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;" || true)
                       if [ -z "${dims}" ]; then
                           echo "  ${col}: not populated (skipping)"

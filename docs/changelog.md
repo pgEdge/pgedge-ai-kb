@@ -5,7 +5,9 @@
 - The pgEdge AI Knowledgebase Builder now supports Gemini as a fourth
   embedding provider; the default model is `gemini-embedding-001`.
   Configure it under the `embeddings.gemini` block in the YAML
-  configuration file.
+  configuration file. The example configuration now enables Gemini by
+  default, so it requires a Gemini API key unless you disable the
+  provider.
 
 - The embedding HTTP and retry logic has migrated to the shared
   `github.com/pgEdge/pgedge-go-llm-lib` library. This consolidates

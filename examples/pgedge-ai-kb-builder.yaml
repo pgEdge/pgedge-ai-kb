@@ -466,7 +466,7 @@ embeddings:
 
     # Gemini embeddings
     gemini:
-        enabled: false
+        enabled: true
         api_key_file: "~/.gemini-api-key"   # Defaults to ~/.gemini-api-key
         model: "gemini-embedding-001"        # Defaults to gemini-embedding-001
 
