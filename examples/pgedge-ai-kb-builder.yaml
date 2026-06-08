@@ -87,6 +87,12 @@ sources:
       project_version: "9.11"
 
     - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
+      tag: "v1.0.0-rc1"
+      doc_path: "docs"
+      project_name: "pgEdge AI DBA Workbench"
+      project_version: "1.0.0-rc1"
+
+    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
       tag: "v1.0.0-beta3"
       doc_path: "docs"
       project_name: "pgEdge AI DBA Workbench"
