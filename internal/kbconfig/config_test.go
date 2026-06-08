@@ -295,6 +295,25 @@ func TestValidateConfig(t *testing.T) {
 			},
 			shouldError: true,
 		},
+		{
+			name: "non-positive per_attempt_timeout",
+			config: &Config{
+				Sources: []DocumentSource{
+					{
+						LocalPath:      "/tmp/test",
+						ProjectName:    "Test",
+						ProjectVersion: "1.0",
+					},
+				},
+				Embeddings: EmbeddingConfig{
+					OpenAI:                    OpenAIConfig{Enabled: true},
+					RequestTimeout:            "10m",
+					RequestTimeoutDuration:    10 * time.Minute,
+					PerAttemptTimeoutDuration: 0,
+				},
+			},
+			shouldError: true,
+		},
 	}
 
 	for _, tt := range tests {
