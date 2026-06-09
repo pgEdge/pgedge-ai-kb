@@ -569,7 +569,13 @@ jobs:
                       # are skipped. (The strict per-provider coverage
                       # assertion lives in generate-kb-db.)
                       for col in openai_embedding voyage_embedding gemini_embedding ollama_embedding; do
-                          dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;" || true)
+                          # No "|| true": a genuine query error (e.g. a
+                          # missing column on an incompatible database)
+                          # must fail the job under set -e, not be masked
+                          # as an empty result. A column that exists but is
+                          # all-NULL returns an empty string with exit 0
+                          # and is correctly skipped below.
+                          dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;")
                           if [ -z "${dims}" ]; then
                               continue
                           fi
