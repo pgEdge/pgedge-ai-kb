@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pgEdge/pgedge-ai-kb/internal/kbchunker"
@@ -108,34 +109,21 @@ func run(cmd *cobra.Command, args []string) error {
 		return runClearEmbeddings(config, clearEmbeddings)
 	}
 
-	fmt.Printf("Output database: %s\n", config.DatabasePath)
+	targets := config.EnabledTargets()
+
 	fmt.Printf("Doc source path: %s\n", config.DocSourcePath)
 	fmt.Printf("Number of sources: %d\n", len(config.Sources))
+	labels := make([]string, len(targets))
+	for i, t := range targets {
+		labels[i] = t.Label
+	}
+	fmt.Printf("Enabled embedding providers: %v\n", labels)
+	fmt.Println("Output databases:")
+	for _, t := range targets {
+		fmt.Printf("  - %s (%s): %s\n", t.Label, t.Model, config.DatabasePathFor(t))
+	}
 
-	// Validate embedding providers
-	enabledProviders := []string{}
-	if config.Embeddings.OpenAI.Enabled {
-		enabledProviders = append(enabledProviders, "OpenAI")
-	}
-	if config.Embeddings.Voyage.Enabled {
-		enabledProviders = append(enabledProviders, "Voyage")
-	}
-	if config.Embeddings.Ollama.Enabled {
-		enabledProviders = append(enabledProviders, "Ollama")
-	}
-	if config.Embeddings.Gemini.Enabled {
-		enabledProviders = append(enabledProviders, "Gemini")
-	}
-	fmt.Printf("Enabled embedding providers: %v\n", enabledProviders)
-
-	// Open database early for checksum checking
-	db, err := kbdatabase.Open(config.DatabasePath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer db.Close()
-
-	// Fetch all documentation sources
+	// Fetch all documentation sources once; every target reuses them.
 	fmt.Println("\n=== Fetching Documentation Sources ===")
 	if skipUpdates {
 		fmt.Println("Note: Skipping git pull updates for existing repositories")
@@ -145,34 +133,56 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to fetch sources: %w", err)
 	}
 
-	// Process all documents (with incremental processing)
+	// Build one self-contained database per target.
+	for _, t := range targets {
+		if err := buildTarget(config, t, sources); err != nil {
+			return fmt.Errorf("failed to build %s database: %w", t.Label, err)
+		}
+	}
+
+	return nil
+}
+
+// buildTarget builds a single provider/model database: it re-processes
+// the (already-fetched) sources into chunks, inserts them, and generates
+// embeddings for this target's provider only. Re-chunking per target is
+// deterministic and CPU-only; embedding API calls happen once per
+// provider regardless, so the per-target loop does not increase API cost.
+func buildTarget(config *kbconfig.Config, t kbconfig.Target, sources []kbsource.SourceInfo) error {
+	dbPath := config.DatabasePathFor(t)
+	fmt.Printf("\n========================================\n")
+	fmt.Printf("Building %s database (%s)\n  -> %s\n", t.Label, t.Model, dbPath)
+	fmt.Printf("========================================\n")
+
+	db, err := kbdatabase.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	// Process all documents (with incremental processing). Chunks are
+	// inserted without embeddings FIRST so each chunk gets a row ID; the
+	// embedding generator then persists embeddings incrementally per
+	// batch, so a ctrl-C mid-run leaves the database recoverable via
+	// --add-missing-embeddings.
 	fmt.Println("\n=== Processing Documents ===")
 	allChunks, err := processAllDocuments(sources, db)
 	if err != nil {
 		return fmt.Errorf("failed to process documents: %w", err)
 	}
-
 	fmt.Printf("\nTotal chunks created/reused: %d\n", len(allChunks))
 
-	// Insert chunks (without embeddings) into the database FIRST so that
-	// each chunk gets a row ID. The embedding generator then persists
-	// embeddings incrementally per batch, which means a ctrl-C mid-run
-	// leaves the database in a recoverable state — re-run with
-	// --add-missing-embeddings to backfill.
 	fmt.Println("\n=== Storing chunks in Database ===")
 	if err := db.InsertChunks(allChunks); err != nil {
 		return fmt.Errorf("failed to insert chunks: %w", err)
 	}
 
-	// Generate embeddings
 	fmt.Println("\n=== Generating Embeddings ===")
-	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	embedGen, err := kbembed.NewEmbeddingGenerator(config.ForProvider(t.Provider), db, maxRetries)
 	if err != nil {
 		return fmt.Errorf("failed to initialize embedding generator: %w", err)
 	}
 	embeddingErrors := embedGen.GenerateEmbeddings(allChunks)
-
-	// Report any embedding failures
 	if len(embeddingErrors) > 0 {
 		fmt.Println("\n⚠️  Warning: Some embedding providers failed:")
 		for provider, err := range embeddingErrors {
@@ -181,13 +191,11 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nContinuing with partial embeddings. Use --add-missing-embeddings later to complete them.")
 	}
 
-	// Print stats
 	fmt.Println("\n=== Database Statistics ===")
 	stats, err := db.GetStats()
 	if err != nil {
 		return fmt.Errorf("failed to get stats: %w", err)
 	}
-
 	fmt.Printf("Total chunks: %v\n", stats["total_chunks"])
 	fmt.Println("Projects:")
 	projects, ok := stats["projects"].([]map[string]interface{})
@@ -199,22 +207,31 @@ func run(cmd *cobra.Command, args []string) error {
 			project["name"], project["version"], project["chunks"])
 	}
 
-	fmt.Printf("\n✓ Knowledgebase successfully built: %s\n", config.DatabasePath)
-
+	fmt.Printf("\n✓ Knowledgebase successfully built: %s\n", dbPath)
 	return nil
 }
 
 func runAddMissingEmbeddings(config *kbconfig.Config) error {
-	fmt.Printf("Adding missing embeddings to: %s\n\n", config.DatabasePath)
+	for _, t := range config.EnabledTargets() {
+		if err := addMissingForTarget(config, t); err != nil {
+			return fmt.Errorf("failed to add missing %s embeddings: %w", t.Label, err)
+		}
+	}
+	return nil
+}
 
-	// Open database
-	db, err := kbdatabase.Open(config.DatabasePath)
+// addMissingForTarget backfills the missing embeddings for a single
+// provider/model database.
+func addMissingForTarget(config *kbconfig.Config, t kbconfig.Target) error {
+	dbPath := config.DatabasePathFor(t)
+	fmt.Printf("\nAdding missing %s embeddings to: %s\n", t.Label, dbPath)
+
+	db, err := kbdatabase.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer db.Close()
 
-	// Get all chunks from database
 	fmt.Println("Loading existing chunks from database...")
 	chunks, err := db.GetAllChunks()
 	if err != nil {
@@ -222,45 +239,25 @@ func runAddMissingEmbeddings(config *kbconfig.Config) error {
 	}
 	fmt.Printf("Loaded %d chunks\n", len(chunks))
 
-	// Filter to only chunks missing embeddings for enabled providers
-	var chunksNeedingEmbeddings []*kbtypes.Chunk
+	var needing []*kbtypes.Chunk
 	for _, chunk := range chunks {
-		needsEmbedding := false
-
-		if config.Embeddings.OpenAI.Enabled && len(chunk.OpenAIEmbedding) == 0 {
-			needsEmbedding = true
-		}
-		if config.Embeddings.Voyage.Enabled && len(chunk.VoyageEmbedding) == 0 {
-			needsEmbedding = true
-		}
-		if config.Embeddings.Ollama.Enabled && len(chunk.OllamaEmbedding) == 0 {
-			needsEmbedding = true
-		}
-		if config.Embeddings.Gemini.Enabled && len(chunk.GeminiEmbedding) == 0 {
-			needsEmbedding = true
-		}
-
-		if needsEmbedding {
-			chunksNeedingEmbeddings = append(chunksNeedingEmbeddings, chunk)
+		if missingEmbedding(chunk, t.Provider) {
+			needing = append(needing, chunk)
 		}
 	}
 
-	if len(chunksNeedingEmbeddings) == 0 {
-		fmt.Println("\n✓ All chunks already have embeddings for enabled providers")
+	if len(needing) == 0 {
+		fmt.Printf("✓ All chunks already have %s embeddings\n", t.Label)
 		return nil
 	}
+	fmt.Printf("Found %d chunks with missing %s embeddings\n", len(needing), t.Label)
 
-	fmt.Printf("\nFound %d chunks with missing embeddings\n", len(chunksNeedingEmbeddings))
-
-	// Generate missing embeddings
 	fmt.Println("\n=== Generating Missing Embeddings ===")
-	embedGen, err := kbembed.NewEmbeddingGenerator(config, db, maxRetries)
+	embedGen, err := kbembed.NewEmbeddingGenerator(config.ForProvider(t.Provider), db, maxRetries)
 	if err != nil {
 		return fmt.Errorf("failed to initialize embedding generator: %w", err)
 	}
-	embeddingErrors := embedGen.GenerateEmbeddings(chunksNeedingEmbeddings)
-
-	// Report any failures
+	embeddingErrors := embedGen.GenerateEmbeddings(needing)
 	if len(embeddingErrors) > 0 {
 		fmt.Println("\n⚠️  Warning: Some embedding providers failed:")
 		for provider, err := range embeddingErrors {
@@ -268,39 +265,48 @@ func runAddMissingEmbeddings(config *kbconfig.Config) error {
 		}
 	}
 
-	// Note: Embeddings are saved incrementally during generation, no final update needed
-
-	fmt.Printf("\n✓ Successfully updated embeddings in: %s\n", config.DatabasePath)
-
-	// Print final stats
-	stats, err := db.GetStats()
-	if err != nil {
-		return fmt.Errorf("failed to get stats: %w", err)
-	}
-
-	fmt.Printf("\nTotal chunks: %v\n", stats["total_chunks"])
-
+	// Embeddings are saved incrementally during generation; no final
+	// update is needed.
+	fmt.Printf("✓ Successfully updated %s embeddings in: %s\n", t.Label, dbPath)
 	return nil
 }
 
-func runClearEmbeddings(config *kbconfig.Config, provider string) error {
-	fmt.Printf("Clearing %s embeddings from: %s\n\n", provider, config.DatabasePath)
+// missingEmbedding reports whether a chunk lacks the named provider's
+// embedding.
+func missingEmbedding(c *kbtypes.Chunk, provider string) bool {
+	switch provider {
+	case "openai":
+		return len(c.OpenAIEmbedding) == 0
+	case "voyage":
+		return len(c.VoyageEmbedding) == 0
+	case "ollama":
+		return len(c.OllamaEmbedding) == 0
+	case "gemini":
+		return len(c.GeminiEmbedding) == 0
+	}
+	return false
+}
 
-	// Open database
-	db, err := kbdatabase.Open(config.DatabasePath)
+func runClearEmbeddings(config *kbconfig.Config, provider string) error {
+	provider = strings.ToLower(provider)
+	target, ok := config.TargetForProvider(provider)
+	if !ok {
+		return fmt.Errorf("invalid or disabled provider %q (must be an enabled provider: openai, voyage, ollama, or gemini)", provider)
+	}
+	dbPath := config.DatabasePathFor(target)
+	fmt.Printf("Clearing %s embeddings from: %s\n\n", provider, dbPath)
+
+	db, err := kbdatabase.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer db.Close()
 
-	// Clear embeddings for the specified provider
 	rowsAffected, err := db.ClearEmbeddings(provider)
 	if err != nil {
 		return fmt.Errorf("failed to clear embeddings: %w", err)
 	}
-
 	fmt.Printf("✓ Successfully cleared %s embeddings from %d chunks\n", provider, rowsAffected)
-
 	return nil
 }
 

@@ -91,7 +91,9 @@ Run the builder against your configuration:
 
 The builder clones the PostgreSQL repository, converts the SGML
 documentation to Markdown, chunks the content, calls the OpenAI
-embeddings API, and writes `bin/pgedge-ai-kb.db`. The run logs
+embeddings API, and writes one database per enabled provider. With
+only OpenAI enabled, it writes
+`bin/pgedge-ai-kb-openai-text-embedding-3-small.db`. The run logs
 progress per file and prints summary statistics on completion.
 
 ## Verify the Output
@@ -100,9 +102,10 @@ Confirm the database exists and inspect a few stats with the
 `sqlite3` CLI:
 
 ```bash
-ls -lh bin/pgedge-ai-kb.db
-sqlite3 bin/pgedge-ai-kb.db "SELECT COUNT(*) FROM chunks;"
-sqlite3 bin/pgedge-ai-kb.db \
+ls -lh bin/pgedge-ai-kb-openai-text-embedding-3-small.db
+sqlite3 bin/pgedge-ai-kb-openai-text-embedding-3-small.db \
+    "SELECT COUNT(*) FROM chunks;"
+sqlite3 bin/pgedge-ai-kb-openai-text-embedding-3-small.db \
     "SELECT project_name, project_version, COUNT(*)
      FROM chunks GROUP BY 1, 2;"
 ```

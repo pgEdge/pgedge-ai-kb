@@ -25,9 +25,12 @@ The builder supports the following flags:
 
 The configuration file accepts the following top-level keys:
 
-- The `database_path` key specifies the path to the output SQLite
-  database. The default is `pgedge-ai-kb.db` next to the
-  configuration file.
+- The `database_path` key is the template for the output databases.
+  The builder writes one database per enabled provider, deriving each
+  filename by appending `-<provider>-<model>` to the path's stem; for
+  example, `bin/kb.db` yields `bin/kb-openai-text-embedding-3-small.db`.
+  The default template is `pgedge-ai-kb.db` next to the configuration
+  file.
 
 - The `doc_source_path` key specifies the directory where the
   builder stores cloned Git repositories and other working state.
@@ -63,7 +66,9 @@ file with comments for every option:
 # ============================================================================
 # OUTPUT DATABASE CONFIGURATION
 # ============================================================================
-# Path to the output SQLite knowledgebase database.
+# Template for the output databases. The builder writes one database
+# per enabled provider, appending -<provider>-<model> to this stem
+# (e.g. pgedge-ai-kb-openai-text-embedding-3-small.db).
 # Default: pgedge-ai-kb.db in the same directory as this config file.
 # Command-line flag: --database or -d
 database_path: "pgedge-ai-kb.db"

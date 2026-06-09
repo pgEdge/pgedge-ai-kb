@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The builder now writes one database per enabled provider/model
+  instead of a single combined `kb.db`, keeping each release asset and
+  package under GitHub's 2 GiB limit. Each file is named
+  `kb-<provider>-<model>.db` (for example,
+  `kb-openai-text-embedding-3-small.db`) and uses the same schema, with
+  only that provider's embedding column populated. The release pipeline
+  publishes each database as its own asset and ships one co-installable
+  OS package per provider/model, named
+  `pgedge-ai-kb-<provider>-<model>`, that installs its database under
+  `/usr/share/pgedge/pgedge-ai-kb/`. Consumers download or install the
+  database matching their configured provider.
+
 - The builder now bounds embedding requests with two configurable
   timeouts, `request_timeout` (overall ceiling including retries) and
   `per_attempt_timeout` (per HTTP attempt), under the `embeddings`

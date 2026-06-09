@@ -27,13 +27,14 @@ Each archive contains:
 - `README.md` and `LICENSE.md`
 - `examples/pgedge-ai-kb-builder.yaml` configuration template
 
-### 2. Knowledgebase Database (`kb.db`)
+### 2. Knowledgebase Databases (`kb-<provider>-<model>.db`)
 
-A separate workflow (`release-kb.yml`) produces a pre-built `kb.db`
-file containing all sources defined in
-`examples/pgedge-ai-kb-builder.yaml`. Downstream consumers (for example,
-the pgEdge Postgres MCP Server) download this artifact at image-build
-time so they ship with an up-to-date knowledgebase.
+A separate workflow (`release-kb.yml`) produces one pre-built
+`kb-<provider>-<model>.db` file per enabled provider, each containing
+all sources defined in `examples/pgedge-ai-kb-builder.yaml`. Downstream
+consumers (for example, the pgEdge Postgres MCP Server) download the
+database for their configured provider at image-build time so they ship
+with an up-to-date knowledgebase.
 
 ## Creating a Binary Release
 
@@ -72,15 +73,16 @@ It:
 1. Checks out the requested branch.
 2. Builds `pgedge-ai-kb-builder` with `CGO_ENABLED=0`.
 3. Starts a local Ollama instance and pulls `nomic-embed-text`.
-4. Loads OpenAI and Voyage API keys from secrets.
+4. Loads OpenAI, Voyage, and Gemini API keys from secrets.
 5. Runs `pgedge-ai-kb-builder` against the canonical
    `examples/pgedge-ai-kb-builder.yaml`.
-6. Publishes the resulting `kb.db` as a tagged release.
+6. Publishes the resulting `kb-<provider>-<model>.db` files as a tagged
+   release.
 
 Run it from the GitHub Actions tab and pass:
 
 - `branch` - the source branch (default `main`).
-- `release_tag` - the tag for the published `kb.db`
+- `release_tag` - the tag for the published databases
   (e.g. `kb-2026-05-15`).
 
 ## Version Numbering

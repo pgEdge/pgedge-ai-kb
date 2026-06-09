@@ -1,16 +1,36 @@
 # Output Database Layout
 
-The builder stores chunks and embeddings in a single SQLite database
-file. Downstream consumers open the file read-only and run vector
-similarity queries against the embedding columns.
+The builder writes one SQLite database per enabled provider/model,
+each holding chunks and that provider's embeddings. Downstream
+consumers open the relevant file read-only and run vector similarity
+queries against the embedding columns.
+
+## File Naming
+
+The builder emits one database per enabled embedding provider, named
+for the provider and the model it embeds with:
+
+```text
+kb-openai-text-embedding-3-small.db
+kb-voyage-voyage-3.db
+kb-ollama-nomic-embed-text.db
+kb-gemini-gemini-embedding-001.db
+```
+
+The builder derives each filename from the configured `database_path`;
+it appends `-<provider>-<model>` to the stem. Every file uses the same
+schema described below, but only the column for that file's provider is
+populated; the other embedding columns remain NULL. A consumer opens
+the database matching its configured provider and reads that provider's
+column.
 
 ## File Format
 
-The database is a standard SQLite 3 file. You can inspect it with the
+Each database is a standard SQLite 3 file. You can inspect one with the
 `sqlite3` CLI or any SQLite-aware tool:
 
 ```bash
-sqlite3 pgedge-ai-kb.db ".schema"
+sqlite3 kb-openai-text-embedding-3-small.db ".schema"
 ```
 
 The database has a `chunks` table that holds every chunk produced by
@@ -124,7 +144,7 @@ After very large incremental updates, the database file may include
 unused space. Reclaim it with `VACUUM`:
 
 ```bash
-sqlite3 pgedge-ai-kb.db "VACUUM;"
+sqlite3 kb-openai-text-embedding-3-small.db "VACUUM;"
 ```
 
 The builder does not run `VACUUM` automatically; you can schedule it

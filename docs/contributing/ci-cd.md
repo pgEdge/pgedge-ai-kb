@@ -44,9 +44,10 @@ which keeps the build fast and reliable for both architectures.
 
 ### Knowledgebase Release (`release-kb.yml`)
 
-The workflow builds a fresh `kb.db` file and publishes it as a
-GitHub Release. The workflow is triggered manually
-(`workflow_dispatch`) and runs on the `ollama` self-hosted runner.
+The workflow builds a fresh set of `kb-<provider>-<model>.db` files,
+one per enabled provider, and publishes them as a GitHub Release. The
+workflow is triggered manually (`workflow_dispatch`) and runs on the
+`ollama` self-hosted runner.
 
 The workflow:
 
@@ -58,14 +59,15 @@ The workflow:
 
 3. Builds `pgedge-ai-kb-builder` with `CGO_ENABLED=0`.
 
-4. Writes OpenAI and Voyage API keys from secrets into the runner's
-   ephemeral directory with mode `0600`.
+4. Writes OpenAI, Voyage, and Gemini API keys from secrets into the
+   runner's ephemeral directory with mode `0600`.
 
 5. Rewrites the example configuration to point at the temporary key
    files and runs the builder with `--max-retries 50`.
 
-6. Publishes the resulting `kb.db` as a tagged release named after
-   the `release_tag` input (for example `kb-2026-05-15`).
+6. Publishes the resulting `kb-<provider>-<model>.db` files as a tagged
+   release named after the `release_tag` input (for example
+   `kb-2026-05-15`).
 
 Run the workflow from the GitHub Actions tab. Provide a `branch`
 (default `main`) and a `release_tag` (for example

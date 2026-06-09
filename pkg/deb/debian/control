@@ -1,17 +1,18 @@
-Source: pgedge-ai-kb
+Source: pgedge-ai-kb-@PKG_SUFFIX@
 Section: database
 Priority: optional
-Maintainer: Muhammad Aqeel <muhammad.aqeel@pgedge.com>
+Maintainer: pgEdge Team <support@pgedge.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.1.3
 Homepage: https://github.com/pgEdge/pgedge-ai-kb
 
-Package: pgedge-ai-kb
+Package: pgedge-ai-kb-@PKG_SUFFIX@
 Architecture: all
 Depends: ${misc:Depends}
-Description: pgEdge AI Knowledgebase database
+Description: pgEdge AI Knowledgebase database (@PKG_SUFFIX@)
  Pre-built SQLite knowledgebase of PostgreSQL and pgEdge documentation
- with embeddings from one or more providers (OpenAI, Voyage, Ollama).
- Consumed by the pgEdge PostgreSQL MCP Server and the pgEdge AI DBA
- Workbench for semantic search. Regenerate or extend it with the
- pgedge-ai-kb-builder binary distributed separately via GitHub Releases.
+ with embeddings for the @PKG_SUFFIX@ provider/model. Consumed by the
+ pgEdge PostgreSQL MCP Server and the pgEdge AI DBA Workbench for
+ semantic search. Regenerate or extend it with the pgedge-ai-kb-builder
+ binary distributed separately via GitHub Releases. Co-installable
+ alongside the other pgedge-ai-kb-<provider>-<model> packages.

@@ -162,7 +162,7 @@ jobs:
                   # by build-rpm.sh / build-deb.sh inside the build container)
                   # and isn't a user-facing artifact, so it's not checksummed
                   # and isn't listed in the release files below.
-                  sha256sum *.tar.gz *.zip kb.db > checksums.txt
+                  sha256sum *.tar.gz *.zip kb-*.db > checksums.txt
                   cat checksums.txt
 
             - name: Create GitHub Release
@@ -171,7 +171,7 @@ jobs:
                   files: |
                       dist/*.tar.gz
                       dist/*.zip
-                      dist/kb.db
+                      dist/kb-*.db
                       dist/checksums.txt
                   generate_release_notes: true
                   draft: false
@@ -369,10 +369,26 @@ jobs:
                   ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50 \
                     2>&1 | tee bin/kb-builder.log
 
-            - name: Verify kb.db was created
+            - name: Verify databases were created
               run: |
-                  [ -f "bin/kb.db" ] || { echo "::error::bin/kb.db was not created"; exit 1; }
-                  echo "kb.db size: $(du -sh bin/kb.db | cut -f1)"
+                  set -euo pipefail
+                  shopt -s nullglob
+                  dbs=(bin/kb-*.db)
+                  if [ "${#dbs[@]}" -eq 0 ]; then
+                    echo "::error::no bin/kb-*.db files were created"
+                    exit 1
+                  fi
+                  limit=2147483648
+                  fail=0
+                  for db in "${dbs[@]}"; do
+                    size=$(wc -c < "$db")
+                    echo "${db}: ${size} bytes ($(du -sh "$db" | cut -f1))"
+                    if [ "$size" -ge "$limit" ]; then
+                      echo "::error::${db} is >= 2 GiB (${size} bytes), exceeds GitHub release-asset limit"
+                      fail=1
+                    fi
+                  done
+                  [ "$fail" -eq 0 ] || exit 1
 
             - name: Verify per-provider coverage (OpenAI, Voyage, Gemini, Ollama)
               # Each provider must log a "<Provider>: Processed N/M chunks"
@@ -431,7 +447,7 @@ jobs:
               with:
                   name: kb-db-validated
                   path: |
-                      bin/kb.db
+                      bin/kb-*.db
                       bin/RELEASE_TAG
                   retention-days: 7
 
@@ -469,7 +485,7 @@ jobs:
                   mkdir -p bin
                   gh release download "${KB_TAG}" \
                       --repo "${GITHUB_REPOSITORY}" \
-                      --pattern 'kb.db' \
+                      --pattern 'kb-*.db' \
                       --dir bin
                   echo "${KB_TAG}" > bin/RELEASE_TAG
                   ls -lh bin/
@@ -479,7 +495,7 @@ jobs:
               with:
                   name: kb-db-validated
                   path: |
-                      bin/kb.db
+                      bin/kb-*.db
                       bin/RELEASE_TAG
                   retention-days: 7
 
@@ -511,56 +527,68 @@ jobs:
             - name: Validate schema, row counts, embedding dimensions
               run: |
                   set -euo pipefail
-                  db=kb.db.cached/kb.db
-
-                  size=$(stat -c%s "${db}" 2>/dev/null || stat -f%z "${db}")
-                  echo "kb.db size: ${size} bytes"
-                  if [ "${size}" -lt 10485760 ]; then
-                      echo "::error::kb.db smaller than 10 MB (${size} bytes)"
+                  shopt -s nullglob
+                  dbs=(kb.db.cached/kb-*.db)
+                  if [ "${#dbs[@]}" -eq 0 ]; then
+                      echo "::error::no kb-*.db files in artifact"
                       exit 1
                   fi
 
-                  tables=$(sqlite3 "${db}" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
-                  echo "Tables found:"; echo "${tables}" | sed 's/^/  /'
-                  echo "${tables}" | grep -qx chunks       || { echo "::error::missing table chunks";       exit 1; }
-                  echo "${tables}" | grep -qx source_files || { echo "::error::missing table source_files"; exit 1; }
+                  for db in "${dbs[@]}"; do
+                      echo "=== Validating ${db} ==="
 
-                  chunk_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM chunks;")
-                  echo "chunks count: ${chunk_count}"
-                  if [ "${chunk_count}" -lt 1000 ]; then
-                      echo "::error::chunk count ${chunk_count} below floor 1000"
-                      exit 1
-                  fi
-
-                  src_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM source_files;")
-                  echo "source_files count: ${src_count}"
-                  if [ "${src_count}" -lt 1 ]; then
-                      echo "::error::no source_files recorded"
-                      exit 1
-                  fi
-
-                  # Embedding-dimension consistency: each provider column
-                  # must have a single distinct BLOB length across all rows
-                  # where set. Columns may be NULL for chunks not embedded
-                  # by that provider — those rows are excluded from the
-                  # check. (The strict per-provider coverage assertion lives
-                  # in generate-kb-db; this is the basic sanity check that
-                  # both inline and discovered kb.db files pass through.)
-                  for col in openai_embedding voyage_embedding gemini_embedding ollama_embedding; do
-                      dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;" || true)
-                      if [ -z "${dims}" ]; then
-                          echo "  ${col}: not populated (skipping)"
-                          continue
-                      fi
-                      n_dims=$(echo "${dims}" | grep -c .)
-                      if [ "${n_dims}" -gt 1 ]; then
-                          echo "::error::inconsistent ${col} dimensions: ${dims}"
+                      size=$(stat -c%s "${db}" 2>/dev/null || stat -f%z "${db}")
+                      echo "size: ${size} bytes"
+                      if [ "${size}" -lt 10485760 ]; then
+                          echo "::error::${db} smaller than 10 MB (${size} bytes)"
                           exit 1
                       fi
-                      echo "  ${col}: dimension ${dims}"
-                  done
 
-                  echo "kb.db validation passed"
+                      tables=$(sqlite3 "${db}" "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+                      echo "${tables}" | grep -qx chunks       || { echo "::error::${db}: missing table chunks";       exit 1; }
+                      echo "${tables}" | grep -qx source_files || { echo "::error::${db}: missing table source_files"; exit 1; }
+
+                      chunk_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM chunks;")
+                      echo "chunks count: ${chunk_count}"
+                      if [ "${chunk_count}" -lt 1000 ]; then
+                          echo "::error::${db}: chunk count ${chunk_count} below floor 1000"
+                          exit 1
+                      fi
+
+                      src_count=$(sqlite3 "${db}" "SELECT COUNT(*) FROM source_files;")
+                      echo "source_files count: ${src_count}"
+                      if [ "${src_count}" -lt 1 ]; then
+                          echo "::error::${db}: no source_files recorded"
+                          exit 1
+                      fi
+
+                      # Embedding-dimension consistency: each provider
+                      # column must have a single distinct BLOB length
+                      # across all rows where set. Per-provider databases
+                      # populate exactly one column; the others are NULL and
+                      # are skipped. (The strict per-provider coverage
+                      # assertion lives in generate-kb-db.)
+                      for col in openai_embedding voyage_embedding gemini_embedding ollama_embedding; do
+                          # No "|| true": a genuine query error (e.g. a
+                          # missing column on an incompatible database)
+                          # must fail the job under set -e, not be masked
+                          # as an empty result. A column that exists but is
+                          # all-NULL returns an empty string with exit 0
+                          # and is correctly skipped below.
+                          dims=$(sqlite3 "${db}" "SELECT DISTINCT length(${col}) FROM chunks WHERE ${col} IS NOT NULL;")
+                          if [ -z "${dims}" ]; then
+                              continue
+                          fi
+                          n_dims=$(echo "${dims}" | grep -c .)
+                          if [ "${n_dims}" -gt 1 ]; then
+                              echo "::error::${db}: inconsistent ${col} dimensions: ${dims}"
+                              exit 1
+                          fi
+                          echo "  ${col}: dimension ${dims}"
+                      done
+
+                      echo "${db} validation passed"
+                  done
 
     # -------------------------------------------------------------------------
     # RPM packaging

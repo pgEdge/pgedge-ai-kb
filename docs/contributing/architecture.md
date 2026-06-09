@@ -16,11 +16,11 @@ The builder is a single Go binary that performs the following work:
 3. The builder chunks each document with structural-element
    preservation and heading hierarchy tracking.
 
-4. The builder generates embeddings using one or more configured
-   providers.
+4. The builder repeats the chunking and embedding work once per
+   enabled provider, generating that provider's embeddings.
 
-5. The builder stores chunks and embeddings in an optimised SQLite
-   database.
+5. The builder stores each provider's chunks and embeddings in its own
+   optimised SQLite database, named `<stem>-<provider>-<model>.db`.
 
 ## Build Pipeline
 
@@ -276,15 +276,18 @@ The end-to-end build proceeds as follows:
 1. The user runs `pgedge-ai-kb-builder --config build.yaml`.
 
 2. `kbconfig` loads the configuration, expands paths, applies
-   defaults, and loads API keys.
+   defaults, loads API keys, and enumerates the enabled provider/model
+   targets.
 
-3. The `main` function opens the output SQLite database (creating
-   the schema on first run).
-
-4. `kbsource.FetchAll` fetches every source; Git sources clone or
+3. `kbsource.FetchAll` fetches every source once; Git sources clone or
    pull, local sources scan the configured directory.
 
-5. For each source, the main loop walks the directory, filters to
+4. The `main` function then builds one database per target. For each
+   target it opens that provider's SQLite database (creating the schema
+   on first run) and re-runs the chunking pipeline against the
+   already-fetched sources.
+
+5. For each source, the per-target loop walks the directory, filters to
    supported file types, and dispatches each file through the
    pipeline:
 
@@ -301,13 +304,11 @@ The end-to-end build proceeds as follows:
     - Otherwise, the pipeline converts the file to Markdown and
       chunks the result.
 
-6. `kbembed.GenerateEmbeddings` produces vectors for every enabled
-   provider.
+6. `kbdatabase.InsertChunks` writes the target's chunks in batched
+   transactions, then `kbembed.GenerateEmbeddings` produces vectors for
+   that one provider and persists them.
 
-7. `kbdatabase.InsertChunks` writes the chunks and embeddings in
-   batched transactions.
-
-8. The main function prints summary statistics and exits.
+7. The main function prints per-target summary statistics and exits.
 
 ## Error Handling
 

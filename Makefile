@@ -24,7 +24,7 @@ kb-builder:
 kb: kb-builder
 	@echo "Building knowledgebase database..."
 	$(BIN_DIR)/$(KB_BUILDER_BINARY) -c examples/pgedge-ai-kb-builder.yaml
-	@echo "Knowledgebase build complete: $(BIN_DIR)/pgedge-ai-kb.db"
+	@echo "Knowledgebase build complete: $(BIN_DIR)/pgedge-ai-kb-*.db (one per enabled provider/model)"
 
 # Build for multiple platforms
 build-all: build-linux build-darwin build-windows

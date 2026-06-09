@@ -391,3 +391,100 @@ func expandPath(path string) string {
 
 	return path
 }
+
+// Target identifies one provider/model combination that produces its
+// own output database. Provider is the canonical lowercase key used by
+// the embedding generator and database columns; Label is the
+// human-facing name; Model is the configured model name.
+type Target struct {
+	Provider string
+	Label    string
+	Model    string
+}
+
+// EnabledTargets returns the enabled provider/model targets in a stable
+// order (openai, voyage, ollama, gemini). Models are populated by
+// applyDefaults for every enabled provider.
+func (c *Config) EnabledTargets() []Target {
+	var targets []Target
+	if c.Embeddings.OpenAI.Enabled {
+		targets = append(targets, Target{"openai", "OpenAI", c.Embeddings.OpenAI.Model})
+	}
+	if c.Embeddings.Voyage.Enabled {
+		targets = append(targets, Target{"voyage", "Voyage", c.Embeddings.Voyage.Model})
+	}
+	if c.Embeddings.Ollama.Enabled {
+		targets = append(targets, Target{"ollama", "Ollama", c.Embeddings.Ollama.Model})
+	}
+	if c.Embeddings.Gemini.Enabled {
+		targets = append(targets, Target{"gemini", "Gemini", c.Embeddings.Gemini.Model})
+	}
+	return targets
+}
+
+// TargetForProvider returns the enabled target for the given provider
+// key, or ok=false if that provider is not enabled.
+func (c *Config) TargetForProvider(provider string) (Target, bool) {
+	for _, t := range c.EnabledTargets() {
+		if t.Provider == provider {
+			return t, true
+		}
+	}
+	return Target{}, false
+}
+
+// DatabasePathFor derives a target's output database path from the
+// configured DatabasePath template:
+//
+//	<dir>/<stem>-<provider>-<sanitizedModel>.db
+//
+// where <stem> is the DatabasePath basename without its extension. For a
+// DatabasePath of "bin/kb.db" and the OpenAI target this yields
+// "bin/kb-openai-text-embedding-3-small.db".
+func (c *Config) DatabasePathFor(t Target) string {
+	dir := filepath.Dir(c.DatabasePath)
+	base := filepath.Base(c.DatabasePath)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	name := fmt.Sprintf("%s-%s-%s.db", stem, t.Provider, sanitizeModel(t.Model))
+	return filepath.Join(dir, name)
+}
+
+// sanitizeModel replaces every character outside [A-Za-z0-9._-] with '-'
+// so a model name is safe to embed in a filename. Each unsafe character
+// maps to a single '-'.
+func sanitizeModel(model string) string {
+	var b strings.Builder
+	for _, r := range model {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
+
+// ForProvider returns a shallow copy of the config with only the named
+// provider enabled. Embeddings is a value field, so toggling the copy's
+// Enabled flags does not affect the receiver. Intended for callers that
+// already know the provider is enabled (e.g. iterating EnabledTargets).
+func (c *Config) ForProvider(provider string) *Config {
+	clone := *c
+	clone.Embeddings.OpenAI.Enabled = false
+	clone.Embeddings.Voyage.Enabled = false
+	clone.Embeddings.Ollama.Enabled = false
+	clone.Embeddings.Gemini.Enabled = false
+	switch provider {
+	case "openai":
+		clone.Embeddings.OpenAI.Enabled = true
+	case "voyage":
+		clone.Embeddings.Voyage.Enabled = true
+	case "ollama":
+		clone.Embeddings.Ollama.Enabled = true
+	case "gemini":
+		clone.Embeddings.Gemini.Enabled = true
+	}
+	return &clone
+}

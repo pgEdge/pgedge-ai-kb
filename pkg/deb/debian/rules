@@ -7,39 +7,40 @@ override_dh_builddeb:
 	dh_builddeb -- -Zgzip
 
 override_dh_auto_install:
-	# --- SBOM for the kb.db file ---
+	# --- SBOM for the database file ---
 	mkdir -p debian/tmp/sbom
-	syft file:$(CURDIR)/kb.db -o cyclonedx-json \
-		> debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
+	syft file:$(CURDIR)/@DB_FILENAME@ -o cyclonedx-json \
+		> debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json || exit 1
 	KEY_ID=$$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $$5}' | head -n 1); export KEY_ID; \
 	gpg --armor --detach-sign --default-key "$$KEY_ID" \
-		--output debian/tmp/sbom/pgedge-ai-kb-sbom.json.asc \
-		debian/tmp/sbom/pgedge-ai-kb-sbom.json || exit 1
+		--output debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json.asc \
+		debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json || exit 1
 
-	# --- Knowledge base database ---
-	install -D -m 644 kb.db \
-		debian/pgedge-ai-kb/usr/share/pgedge/pgedge-ai-kb/kb.db
+	# --- Knowledge base database (distinct filename per provider/model,
+	#     so the packages are co-installable under one shared dir) ---
+	install -D -m 644 @DB_FILENAME@ \
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge/pgedge-ai-kb/@DB_FILENAME@
 
 	# --- Documentation ---
 	install -D -m 644 LICENSE.md \
-		debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/LICENSE.md
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/doc/pgedge-ai-kb-@PKG_SUFFIX@/LICENSE.md
 	install -D -m 644 README.md \
-		debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/README.md
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/doc/pgedge-ai-kb-@PKG_SUFFIX@/README.md
 
 	# VERSION metadata — env vars come from build-deb.sh / common.sh.
-	install -d debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb
+	install -d debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/doc/pgedge-ai-kb-@PKG_SUFFIX@
 	{ \
 		echo "PGEDGE_AI_KB_VERSION=$${PGEDGE_KB_VERSION}-$${PGEDGE_KB_BUILDNUM}"; \
 		echo "KB_DB_RELEASE_TAG=$${KB_DB_RELEASE_TAG:-unknown}"; \
 		echo "BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 		echo "BUILD_COMMIT=$${GITHUB_SHA:-unknown}"; \
 		echo "REPO_TYPE=$${REPO_TYPE:-unknown}"; \
-	} > debian/pgedge-ai-kb/usr/share/doc/pgedge-ai-kb/VERSION
+	} > debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/doc/pgedge-ai-kb-@PKG_SUFFIX@/VERSION
 
-	# --- SBOM install ---
-	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-sbom.json \
-		debian/pgedge-ai-kb/usr/share/pgedge-ai-kb-sbom.json
-	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-sbom.json.asc \
-		debian/pgedge-ai-kb/usr/share/pgedge-ai-kb-sbom.json.asc
+	# --- SBOM install (distinct filename per package) ---
+	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json \
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json
+	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json.asc \
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json.asc
 
 	rm -rf debian/tmp/sbom

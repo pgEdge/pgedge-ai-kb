@@ -16,7 +16,7 @@ permissions:
 
 jobs:
     build-and-release-kb:
-        name: Build and Release kb.db
+        name: Build and Release knowledge base databases
         runs-on: [ollama, self-hosted]
         steps:
             - name: Checkout code
@@ -72,13 +72,16 @@ jobs:
               env:
                   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+                  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
               run: |
                   [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
                   [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
+                  [ -n "$GEMINI_API_KEY" ] || { echo "GEMINI_API_KEY secret is missing"; exit 1; }
                   mkdir -p "$API_KEYS_DIR"
                   printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
                   printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
+                  printf '%s' "$GEMINI_API_KEY" > "$API_KEYS_DIR/gemini-key"
                   chmod 600 "$API_KEYS_DIR"/*
 
             - name: Configure kb-builder for cloud providers
@@ -89,27 +92,43 @@ jobs:
                   sed -i '' 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' examples/pgedge-ai-kb-builder-build.yaml
                   sed -i '' "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" examples/pgedge-ai-kb-builder-build.yaml
                   sed -i '' "s|api_key_file: \"~/.voyage-api-key\"|api_key_file: \"${API_KEYS_DIR}/voyage-key\"|" examples/pgedge-ai-kb-builder-build.yaml
+                  sed -i '' "s|api_key_file: \"~/.gemini-api-key\"|api_key_file: \"${API_KEYS_DIR}/gemini-key\"|" examples/pgedge-ai-kb-builder-build.yaml
                   sed -i '' 's|git@github.com:|https://github.com/|g' examples/pgedge-ai-kb-builder-build.yaml
                   grep -q 'database_path: "bin/kb.db"' examples/pgedge-ai-kb-builder-build.yaml || { echo "database_path replacement failed"; exit 1; }
                   grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "OpenAI key path replacement failed"; exit 1; }
                   grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "Voyage key path replacement failed"; exit 1; }
+                  grep -q "api_key_file: \"${API_KEYS_DIR}/gemini-key\"" examples/pgedge-ai-kb-builder-build.yaml || { echo "Gemini key path replacement failed"; exit 1; }
                   grep -q 'https://github.com/' examples/pgedge-ai-kb-builder-build.yaml || { echo "SSH URL replacement failed"; exit 1; }
 
-            - name: Generate kb.db
+            - name: Generate databases
               run: |
                   mkdir -p bin
                   ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50
               env:
                   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+                  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
-            - name: Verify kb.db was created
+            - name: Verify databases were created
               run: |
-                  if [ ! -f "bin/kb.db" ]; then
-                    echo "Error: bin/kb.db was not created"
+                  set -euo pipefail
+                  shopt -s nullglob
+                  dbs=(bin/kb-*.db)
+                  if [ "${#dbs[@]}" -eq 0 ]; then
+                    echo "::error::no bin/kb-*.db files were created"
                     exit 1
                   fi
-                  echo "kb.db size: $(du -sh bin/kb.db | cut -f1)"
+                  limit=2147483648
+                  fail=0
+                  for db in "${dbs[@]}"; do
+                    size=$(wc -c < "$db")
+                    echo "${db}: ${size} bytes ($(du -sh "$db" | cut -f1))"
+                    if [ "$size" -ge "$limit" ]; then
+                      echo "::error::${db} is >= 2 GiB (${size} bytes), exceeds GitHub release-asset limit"
+                      fail=1
+                    fi
+                  done
+                  [ "$fail" -eq 0 ] || exit 1
 
             - name: Cleanup
               if: always()
@@ -129,11 +148,14 @@ jobs:
                   tag_name: ${{ github.event.inputs.release_tag }}
                   name: Knowledge Base ${{ github.event.inputs.release_tag }}
                   body: |
-                      Knowledge base database built from branch `${{ github.event.inputs.branch }}`.
+                      Per-provider/per-model knowledge base databases built from
+                      branch `${{ github.event.inputs.branch }}`.
 
-                      This release contains only `kb.db` for use by downstream consumers such as
-                      the pgEdge Postgres MCP Server and the pgEdge AI DBA Workbench.
-                  files: bin/kb.db
+                      Each `kb-<provider>-<model>.db` file is a SQLite knowledgebase
+                      for a single embedding provider, for use by downstream consumers
+                      such as the pgEdge Postgres MCP Server and the pgEdge AI DBA
+                      Workbench. Download the database matching your configured provider.
+                  files: bin/kb-*.db
                   draft: false
                   prerelease: false
               env:
