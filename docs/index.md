@@ -1,12 +1,12 @@
 # pgEdge AI Knowledgebase Builder
 
 The pgEdge AI Knowledgebase Builder ingests documentation from Git
-repositories and local paths, then assembles a single SQLite database
-of intelligently chunked text with vector embeddings. Downstream pgEdge
-tools (such as the [pgEdge Postgres MCP
-Server](https://github.com/pgEdge/pgedge-postgres-mcp) and the pgEdge
-AI DBA Workbench) load the database to power semantic search across
-PostgreSQL and pgEdge documentation.
+repositories and local paths, then assembles one SQLite database per
+enabled embedding provider, each holding intelligently chunked text
+with vector embeddings. Downstream pgEdge tools (such as the [pgEdge
+Postgres MCP Server](https://github.com/pgEdge/pgedge-postgres-mcp) and
+the pgEdge AI DBA Workbench) load the database for their provider to
+power semantic search across PostgreSQL and pgEdge documentation.
 
 **[Quick Start →](guide/quickstart.md)** - Build your first knowledgebase
 in minutes.
@@ -37,7 +37,7 @@ flowchart LR
     B --> C[Convert to Markdown]
     C --> D[Chunk]
     D --> E[Embed]
-    E --> F[SQLite kb.db]
+    E --> F[Per-provider SQLite databases]
 ```
 
 1. The builder loads the YAML configuration and resolves API key files.
@@ -54,8 +54,9 @@ flowchart LR
 5. The embedding generator calls each enabled provider to produce
    vectors for every chunk.
 
-6. The database writer stores chunks and embeddings in an optimised
-   SQLite database that downstream consumers query at runtime.
+6. The database writer stores chunks and embeddings in one optimised
+   SQLite database per provider that downstream consumers query at
+   runtime.
 
 ## User Guide
 

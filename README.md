@@ -48,8 +48,9 @@ cp examples/pgedge-ai-kb-builder.yaml ./pgedge-ai-kb-builder.yaml
 ./bin/pgedge-ai-kb-builder --config pgedge-ai-kb-builder.yaml
 ```
 
-The build produces `pgedge-ai-kb.db`, a SQLite knowledgebase database that
-downstream consumers load for semantic search.
+The build produces one SQLite knowledgebase database per enabled
+provider, named `pgedge-ai-kb-<provider>-<model>.db`; downstream
+consumers load the database for their provider for semantic search.
 
 ## Key Features
 

@@ -136,17 +136,17 @@ The build pipeline performs the following work:
 2. The builder fetches each source by cloning or pulling Git
    repositories and scanning local paths.
 
-3. The converter walks every supported file in each source, converts
-   it to Markdown, and chunks the content.
+3. For each enabled provider, the converter walks every supported file
+   in each source, converts it to Markdown, and chunks the content.
 
-4. The embedding generator calls every enabled provider in batch and
-   stores the resulting vectors against the chunks.
+4. The embedding generator calls that provider in batch and stores the
+   resulting vectors against the chunks.
 
-5. The database writer persists chunks and embeddings to the output
-   SQLite database.
+5. The database writer persists chunks and embeddings to that
+   provider's SQLite database, named `<stem>-<provider>-<model>.db`.
 
 The build prints per-file progress lines and ends with summary
-statistics:
+statistics for each provider's database:
 
 ```text
 Total chunks: 31423
@@ -154,7 +154,7 @@ Projects:
   - PostgreSQL 17: 28932 chunks
   - My E-Commerce App 1.0: 2491 chunks
 
-✓ Knowledgebase successfully built: my-project-kb.db
+✓ Knowledgebase successfully built: my-project-kb-openai-text-embedding-3-small.db
 ```
 
 ## Rebuilding Incrementally
