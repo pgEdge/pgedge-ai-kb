@@ -431,3 +431,82 @@ func TestApplyDefaults(t *testing.T) {
 		t.Error("Gemini.APIKeyFile should have default")
 	}
 }
+
+func cfgWithProviders(openai, voyage, ollama, gemini bool) *Config {
+	c := &Config{DatabasePath: "bin/kb.db"}
+	c.Embeddings.OpenAI = OpenAIConfig{Enabled: openai, Model: "text-embedding-3-small"}
+	c.Embeddings.Voyage = VoyageConfig{Enabled: voyage, Model: "voyage-3"}
+	c.Embeddings.Ollama = OllamaConfig{Enabled: ollama, Model: "nomic-embed-text"}
+	c.Embeddings.Gemini = GeminiConfig{Enabled: gemini, Model: "gemini-embedding-001"}
+	return c
+}
+
+func TestEnabledTargets_OrderAndContents(t *testing.T) {
+	c := cfgWithProviders(true, false, true, true)
+	got := c.EnabledTargets()
+	want := []Target{
+		{Provider: "openai", Label: "OpenAI", Model: "text-embedding-3-small"},
+		{Provider: "ollama", Label: "Ollama", Model: "nomic-embed-text"},
+		{Provider: "gemini", Label: "Gemini", Model: "gemini-embedding-001"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d targets, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("target %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDatabasePathFor(t *testing.T) {
+	c := cfgWithProviders(true, true, true, true)
+	cases := map[string]string{
+		"openai": "bin/kb-openai-text-embedding-3-small.db",
+		"voyage": "bin/kb-voyage-voyage-3.db",
+		"ollama": "bin/kb-ollama-nomic-embed-text.db",
+		"gemini": "bin/kb-gemini-gemini-embedding-001.db",
+	}
+	for _, target := range c.EnabledTargets() {
+		got := c.DatabasePathFor(target)
+		if want := filepath.FromSlash(cases[target.Provider]); got != want {
+			t.Errorf("%s: got %q, want %q", target.Provider, got, want)
+		}
+	}
+}
+
+func TestDatabasePathFor_TemplateStemAndSanitize(t *testing.T) {
+	c := &Config{DatabasePath: filepath.FromSlash("out/pgedge-ai-kb.db")}
+	c.Embeddings.Voyage = VoyageConfig{Enabled: true, Model: "voyage/3.5 beta"}
+	got := c.DatabasePathFor(c.EnabledTargets()[0])
+	want := filepath.FromSlash("out/pgedge-ai-kb-voyage-voyage-3.5-beta.db")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestForProvider_OnlyOneEnabled(t *testing.T) {
+	c := cfgWithProviders(true, true, true, true)
+	got := c.ForProvider("gemini")
+	if !got.Embeddings.Gemini.Enabled {
+		t.Error("gemini should be enabled in the view")
+	}
+	if got.Embeddings.OpenAI.Enabled || got.Embeddings.Voyage.Enabled ||
+		got.Embeddings.Ollama.Enabled {
+		t.Error("only gemini should be enabled in the view")
+	}
+	if !c.Embeddings.OpenAI.Enabled {
+		t.Error("original config must be unchanged")
+	}
+}
+
+func TestTargetForProvider(t *testing.T) {
+	c := cfgWithProviders(true, false, false, false)
+	if _, ok := c.TargetForProvider("voyage"); ok {
+		t.Error("voyage is disabled; lookup should fail")
+	}
+	tg, ok := c.TargetForProvider("openai")
+	if !ok || tg.Model != "text-embedding-3-small" {
+		t.Errorf("openai lookup = %+v, ok=%v", tg, ok)
+	}
+}
