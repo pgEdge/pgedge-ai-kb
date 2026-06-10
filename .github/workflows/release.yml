@@ -31,6 +31,60 @@ concurrency:
 
 jobs:
     # =========================================================================
+    # Configure: single source of truth for platforms + architectures.
+    # Edit the lists below to add/remove targets — every downstream job
+    # (matrices, organize loops, action targets, manifest cells) reads from
+    # this job's outputs. No other place in the workflow hardcodes a list.
+    # =========================================================================
+
+    configure:
+        name: Resolve platforms + architectures
+        runs-on: ubuntu-latest
+        outputs:
+            arch:            ${{ steps.cfg.outputs.arch }}
+            dnf_os_versions: ${{ steps.cfg.outputs.dnf_os_versions }}
+            apt_targets:     ${{ steps.cfg.outputs.apt_targets }}
+        steps:
+            - id: cfg
+              run: |
+                  set -euo pipefail
+                  # ─── EDIT HERE to add/remove platforms ──────────────────
+                  # Build packages are noarch (data-only kb.db), so a single
+                  # arch covers all targets. Change to an array if any future
+                  # package becomes arch-specific.
+                  arch='amd64'
+
+                  # DNF: EL major versions to build for.
+                  dnf_os_versions='["9","10"]'
+
+                  # APT: distro + image-family pairs. family becomes the
+                  # Docker image prefix (ubuntu: vs debian:).
+                  apt_targets='[
+                    {"distro":"jammy",   "family":"ubuntu"},
+                    {"distro":"noble",   "family":"ubuntu"},
+                    {"distro":"bullseye","family":"debian"},
+                    {"distro":"bookworm","family":"debian"},
+                    {"distro":"trixie",  "family":"debian"}
+                  ]'
+
+                  # ─── End of editable section ────────────────────────────
+                  # Emit as GITHUB_OUTPUT (multi-line JSON via heredoc).
+                  # fromJSON() doesn't care about whitespace, so we don't
+                  # need to compact the apt_targets value here.
+                  {
+                      echo "arch=${arch}"
+                      echo "dnf_os_versions=${dnf_os_versions}"
+                      echo "apt_targets<<__APT_TARGETS_EOF__"
+                      echo "${apt_targets}"
+                      echo "__APT_TARGETS_EOF__"
+                  } >> "$GITHUB_OUTPUT"
+
+                  echo "Resolved platforms:"
+                  echo "  arch=${arch}"
+                  echo "  dnf_os_versions=${dnf_os_versions}"
+                  echo "  apt_targets=$(echo "${apt_targets}" | jq -c '.')"
+
+    # =========================================================================
     # Binary builds (unchanged from prior version)
     # =========================================================================
 
@@ -595,8 +649,8 @@ jobs:
     # -------------------------------------------------------------------------
 
     package-rpm:
-        name: Package RPM (${{ matrix.image }} noarch)
-        needs: [determine-repo-type, validate-kb-db]
+        name: Package RPM (el${{ matrix.os_version }} noarch)
+        needs: [configure, determine-repo-type, validate-kb-db]
         # always() + explicit needs check is required because validate-kb-db
         # has an OR'd dependency (generate-kb-db || discover-kb-db) and the
         # default success() check would mistakenly propagate the SKIPPED
@@ -607,16 +661,18 @@ jobs:
             needs.validate-kb-db.result == 'success'
         runs-on: ubuntu-latest
         # Package is noarch (data-only kb.db). One cell per EL major; built
-        # on amd64 runner since the resulting RPM is arch-independent.
+        # on the configured arch (default amd64) since the resulting RPM is
+        # arch-independent. EL-major list comes from configure.dnf_os_versions.
         strategy:
             fail-fast: false
             matrix:
-                image: ['almalinux:9', 'almalinux:10']
+                os_version: ${{ fromJSON(needs.configure.outputs.dnf_os_versions) }}
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
             KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+            ARCH: ${{ needs.configure.outputs.arch }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -625,12 +681,6 @@ jobs:
               id: vars
               run: |
                   set -euo pipefail
-                  case "${{ matrix.image }}" in
-                      *:9)  os_version=9  ;;
-                      *:10) os_version=10 ;;
-                      *)    echo "::error::Unexpected image ${{ matrix.image }}"; exit 1 ;;
-                  esac
-                  echo "os-version=${os_version}"     >> "$GITHUB_OUTPUT"
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Download validated kb.db
@@ -654,8 +704,8 @@ jobs:
             - name: Build RPM
               uses: ./.github/actions/pgedge-builder-action
               with:
-                  image: ${{ matrix.image }}
-                  arch: amd64
+                  image: almalinux:${{ matrix.os_version }}
+                  arch: ${{ env.ARCH }}
                   component_name: pkg
                   component_version: ${{ env.COMPONENT_VERSION }}
                   component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
@@ -667,8 +717,8 @@ jobs:
             - name: Upload RPM cell artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: rpm__el-${{ steps.vars.outputs.os-version }}
-                  path: output/el${{ steps.vars.outputs.os-version }}-amd64/
+                  name: rpm__el-${{ matrix.os_version }}
+                  path: output/el${{ matrix.os_version }}-${{ env.ARCH }}/
                   retention-days: 7
 
     push-dnf:
@@ -680,7 +730,7 @@ jobs:
             always() && github.ref_type == 'tag' &&
             (needs.package-rpm.result == 'success' ||
              (github.event.inputs.force_push == 'true' && needs.package-rpm.result != 'cancelled'))
-        needs: [determine-repo-type, package-rpm]
+        needs: [configure, determine-repo-type, package-rpm]
         runs-on: ubuntu-latest
         # Single job across all EL majors. Steps below invoke the dnf repo
         # builder once per major sequentially so two majors never write to S3
@@ -697,6 +747,7 @@ jobs:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_NAME: ${{ github.event.repository.name }}
+            DNF_OS_VERSIONS: ${{ needs.configure.outputs.dnf_os_versions }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -714,7 +765,9 @@ jobs:
               id: organize
               run: |
                   set -euo pipefail
-                  for os_version in 9 10; do
+                  # OS list comes from the configure job — edit
+                  # configure.outputs.dnf_os_versions to add/remove an EL major.
+                  for os_version in $(echo "$DNF_OS_VERSIONS" | jq -r '.[]'); do
                       mkdir -p "rpms-el${os_version}"
                       src_dir="rpm-artifacts/rpm__el-${os_version}"
                       if [ -d "${src_dir}" ]; then
@@ -726,6 +779,19 @@ jobs:
                   rm -rf rpm-artifacts
                   # Single timestamp shared by all backups in this push job.
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Build targets JSON for push + backup
+              id: targets
+              run: |
+                  set -euo pipefail
+                  # push targets: {"os-version", "rpm-dir"}
+                  push=$(echo "$DNF_OS_VERSIONS" \
+                      | jq -c 'map({"os-version": ., "rpm-dir": ("rpms-el" + .)})')
+                  # backup targets: {"os-version", "output-dir"}
+                  backup=$(echo "$DNF_OS_VERSIONS" \
+                      | jq -c 'map({"os-version": ., "output-dir": ("rpms-el" + .)})')
+                  echo "push=${push}"     >> "$GITHUB_OUTPUT"
+                  echo "backup=${backup}" >> "$GITHUB_OUTPUT"
 
             - name: Checkout pgEdge action repos @multi-target
               env:
@@ -742,27 +808,23 @@ jobs:
                           ".github/actions/${repo}"
                   done
 
-            - name: Push RPMs to yum repo (EL9 + EL10 batched)
+            - name: Push RPMs to yum repo (all EL majors batched)
               uses: ./.github/actions/pgedge-dnf-repo-builder
               with:
                   s3-bucket: ${{ secrets.S3_BUCKET_NAME }}
                   cf-distribution: ${{ secrets.CLOUDFRONT_DISTRIBUTION }}
                   repo-type: ${{ env.REPO_TYPE }}
-                  # Both OSes in one invocation. Empty rpm-dirs (e.g. under
+                  # All OSes in one invocation. Empty rpm-dirs (e.g. under
                   # force_push partial failure) are skipped inside the action.
-                  targets: |
-                      [
-                        {"os-version": "9",  "rpm-dir": "rpms-el9"},
-                        {"os-version": "10", "rpm-dir": "rpms-el10"}
-                      ]
+                  targets: ${{ steps.targets.outputs.push }}
                   # Cross-repo push lock — every consumer that touches
                   # dnf.pgedge.com must pass this so they all serialize
-                  # against the same _dnf_lock/ prefix.
+                  # against the same _dnf_lock/<repo_type>/ prefix.
                   lock-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-            - name: Back up RPMs to S3 (EL9 + EL10 batched)
+            - name: Back up RPMs to S3 (all EL majors batched)
               uses: ./.github/actions/pgedge-backup-artifacts
               with:
                   s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
@@ -773,11 +835,7 @@ jobs:
                   # mktemp -d inside the action gives each target its own
                   # staging dir; the old "Reset backup staging dir" steps
                   # are no longer needed.
-                  targets: |
-                      [
-                        {"os-version": "9",  "output-dir": "rpms-el9"},
-                        {"os-version": "10", "output-dir": "rpms-el10"}
-                      ]
+                  targets: ${{ steps.targets.outputs.backup }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
@@ -789,8 +847,8 @@ jobs:
     # -------------------------------------------------------------------------
 
     package-deb:
-        name: Package DEB (${{ matrix.image }} all)
-        needs: [determine-repo-type, validate-kb-db]
+        name: Package DEB (${{ matrix.family }}:${{ matrix.distro }} all)
+        needs: [configure, determine-repo-type, validate-kb-db]
         # See package-rpm for why always() + explicit needs check is needed.
         if: |
             always() &&
@@ -799,20 +857,18 @@ jobs:
         runs-on: ubuntu-latest
         # Package is Architecture: all (data-only kb.db). One cell per distro;
         # built on amd64 runner since the resulting DEB is arch-independent.
+        # Distro list comes from the configure job — edit
+        # configure.outputs.apt_targets to add/remove a distro.
         strategy:
             fail-fast: false
             matrix:
-                include:
-                    - { image: 'ubuntu:jammy',    distro: jammy    }
-                    - { image: 'ubuntu:noble',    distro: noble    }
-                    - { image: 'debian:bullseye', distro: bullseye }
-                    - { image: 'debian:bookworm', distro: bookworm }
-                    - { image: 'debian:trixie',   distro: trixie   }
+                include: ${{ fromJSON(needs.configure.outputs.apt_targets) }}
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
             KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
+            ARCH: ${{ needs.configure.outputs.arch }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -844,8 +900,8 @@ jobs:
             - name: Build DEB
               uses: ./.github/actions/pgedge-builder-action
               with:
-                  image: ${{ matrix.image }}
-                  arch: amd64
+                  image: ${{ matrix.family }}:${{ matrix.distro }}
+                  arch: ${{ env.ARCH }}
                   component_name: pkg
                   component_version: ${{ env.COMPONENT_VERSION }}
                   component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
@@ -858,7 +914,7 @@ jobs:
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: deb__${{ matrix.distro }}
-                  path: output/${{ matrix.distro }}-amd64/
+                  path: output/${{ matrix.distro }}-${{ env.ARCH }}/
                   retention-days: 7
 
     push-apt:
@@ -869,7 +925,7 @@ jobs:
             always() && github.ref_type == 'tag' &&
             (needs.package-deb.result == 'success' ||
              (github.event.inputs.force_push == 'true' && needs.package-deb.result != 'cancelled'))
-        needs: [determine-repo-type, package-deb]
+        needs: [configure, determine-repo-type, package-deb]
         runs-on: ubuntu-latest
         # Single job across all distros. Push + backup are invoked once per
         # distro sequentially below; no parallel writes to the apt S3 bucket.
@@ -884,6 +940,7 @@ jobs:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_NAME: ${{ github.event.repository.name }}
+            APT_TARGETS: ${{ needs.configure.outputs.apt_targets }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -899,7 +956,9 @@ jobs:
               id: organize
               run: |
                   set -euo pipefail
-                  for distro in jammy noble bullseye bookworm trixie; do
+                  # Distro list comes from the configure job — edit
+                  # configure.outputs.apt_targets to add/remove a distro.
+                  for distro in $(echo "$APT_TARGETS" | jq -r '.[].distro'); do
                       mkdir -p "debs-${distro}"
                       src_dir="deb-artifacts/deb__${distro}"
                       if [ -d "${src_dir}" ]; then
@@ -910,6 +969,19 @@ jobs:
                   done
                   rm -rf deb-artifacts
                   echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+            - name: Build targets JSON for push + backup
+              id: targets
+              run: |
+                  set -euo pipefail
+                  # push targets: {"os-name": "<family>:<distro>", "deb-dir": "debs-<distro>"}
+                  push=$(echo "$APT_TARGETS" \
+                      | jq -c 'map({"os-name": (.family + ":" + .distro), "deb-dir": ("debs-" + .distro)})')
+                  # backup targets: {"os-version": "<distro>", "output-dir": "debs-<distro>"}
+                  backup=$(echo "$APT_TARGETS" \
+                      | jq -c 'map({"os-version": .distro, "output-dir": ("debs-" + .distro)})')
+                  echo "push=${push}"     >> "$GITHUB_OUTPUT"
+                  echo "backup=${backup}" >> "$GITHUB_OUTPUT"
 
             - name: Checkout pgEdge action repos @multi-target
               env:
@@ -925,38 +997,26 @@ jobs:
                           ".github/actions/${repo}"
                   done
 
-            - name: Push DEBs to apt repo (all 5 distros batched)
+            - name: Push DEBs to apt repo (all distros batched)
               uses: ./.github/actions/pgedge-apt-repo-builder
               with:
                   s3-bucket: ${{ secrets.APT_S3_BUCKET_NAME }}
                   cf-distribution: ${{ secrets.APT_CLOUDFRONT_DISTRIBUTION }}
                   repo-type: ${{ env.REPO_TYPE }}
-                  # All 5 distros in one invocation. One reprepro setup,
+                  # All distros in one invocation. One reprepro setup,
                   # one CloudFront invalidate covering all distro prefixes.
                   # Empty deb-dirs (under force_push partial failure) are
                   # skipped inside the action.
-                  # When ubuntu:resolute joins the build matrix, add a
-                  # debs-resolute cell to package-deb and insert this entry
-                  # into the targets array below (and into the backup
-                  # targets a few lines down):
-                  #   {"os-name": "ubuntu:resolute", "deb-dir": "debs-resolute"}
-                  targets: |
-                      [
-                        {"os-name": "ubuntu:jammy",    "deb-dir": "debs-jammy"},
-                        {"os-name": "ubuntu:noble",    "deb-dir": "debs-noble"},
-                        {"os-name": "debian:bullseye", "deb-dir": "debs-bullseye"},
-                        {"os-name": "debian:bookworm", "deb-dir": "debs-bookworm"},
-                        {"os-name": "debian:trixie",   "deb-dir": "debs-trixie"}
-                      ]
+                  targets: ${{ steps.targets.outputs.push }}
                   # Cross-repo push lock — every consumer that touches
                   # apt.pgedge.com must pass this so they all serialize
-                  # against the same _apt_lock/ prefix.
+                  # against the same _apt_lock/<repo_type>/ prefix.
                   lock-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   gpg-private-key: ${{ secrets.GPG_FIPS_DEB_PRIVATE_KEY }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-            - name: Back up DEBs to S3 (all 5 distros batched)
+            - name: Back up DEBs to S3 (all distros batched)
               uses: ./.github/actions/pgedge-backup-artifacts
               with:
                   s3-backup-bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
@@ -967,17 +1027,7 @@ jobs:
                   # mktemp -d inside the action gives each target its own
                   # staging dir; the old "Reset backup staging dir" steps
                   # are no longer needed.
-                  #
-                  # When ubuntu:resolute joins the matrix, add:
-                  #   {"os-version": "resolute", "output-dir": "debs-resolute"}
-                  targets: |
-                      [
-                        {"os-version": "jammy",    "output-dir": "debs-jammy"},
-                        {"os-version": "noble",    "output-dir": "debs-noble"},
-                        {"os-version": "bullseye", "output-dir": "debs-bullseye"},
-                        {"os-version": "bookworm", "output-dir": "debs-bookworm"},
-                        {"os-version": "trixie",   "output-dir": "debs-trixie"}
-                      ]
+                  targets: ${{ steps.targets.outputs.backup }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
@@ -990,7 +1040,7 @@ jobs:
 
     publish-manifest:
         name: Publish aggregated backup manifest
-        needs: [determine-repo-type, validate-kb-db, push-dnf, push-apt]
+        needs: [configure, determine-repo-type, validate-kb-db, push-dnf, push-apt]
         if: always() && needs.determine-repo-type.result == 'success'
         runs-on: ubuntu-latest
         env:
@@ -1003,7 +1053,8 @@ jobs:
                   pip3 install --user awscli
                   echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-            - name: Build path-only manifest
+            - name: Build manifest (with cells[] for qa-certify/promote)
+              id: build_manifest
               env:
                   REPO_TYPE:        ${{ needs.determine-repo-type.outputs.repo-type }}
                   CV:               ${{ needs.determine-repo-type.outputs.component-version }}
@@ -1015,6 +1066,9 @@ jobs:
                   PUSH_APT_RESULT:  ${{ needs.push-apt.result }}
                   DNF_TS:           ${{ needs.push-dnf.outputs.timestamp }}
                   APT_TS:           ${{ needs.push-apt.outputs.timestamp }}
+                  ARCH:             ${{ needs.configure.outputs.arch }}
+                  DNF_OS_VERSIONS:  ${{ needs.configure.outputs.dnf_os_versions }}
+                  APT_TARGETS:      ${{ needs.configure.outputs.apt_targets }}
               run: |
                   set -euo pipefail
                   mkdir -p aggregated
@@ -1029,20 +1083,48 @@ jobs:
                   # We unconditionally list every matrix target — under
                   # force_push partial failure, a listed prefix may be empty
                   # in S3 and the promoter handles that via `aws s3 ls`.
+                  #
+                  # Two structures derived from the same data:
+                  #   backups.{dnf,apt}: legacy flat path arrays (kept for
+                  #     backwards compat with anything still reading them)
+                  #   cells[]:           per-OS/per-distro records that
+                  #     qa-certify/promote.yml read to build their matrices
+                  #
+                  # OS/distro lists come from the configure job — same source
+                  # of truth as the build matrices and push targets.
                   dnf_backups='[]'
+                  cells='[]'
                   if [ -n "${DNF_TS}" ]; then
-                      for os in 9 10; do
+                      for os in $(echo "$DNF_OS_VERSIONS" | jq -r '.[]'); do
                           path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
                           dnf_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${dnf_backups}")"
+                          cell="$(jq -nc \
+                              --arg fam rpm --arg comp "$COMPONENT_NAME" --arg cv "$CV" \
+                              --arg img "almalinux:${os}" --arg ver "${os}" \
+                              --arg arch "${ARCH}" \
+                              --arg bp "${path}" --arg ts "$DNF_TS" --arg rt "$REPO_TYPE" \
+                              '{family:$fam, component:$comp, component_version:$cv,
+                                image:$img, arch:$arch, os_version:$ver,
+                                backup_path:$bp, timestamp:$ts, repo_type:$rt}')"
+                          cells="$(jq -c --argjson c "${cell}" '. + [$c]' <<<"${cells}")"
                       done
                   fi
 
                   apt_backups='[]'
                   if [ -n "${APT_TS}" ]; then
-                      for distro in jammy noble bullseye bookworm trixie; do
+                      while IFS=$'\t' read -r distro family_img; do
                           path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
                           apt_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${apt_backups}")"
-                      done
+                          cell="$(jq -nc \
+                              --arg fam deb --arg comp "$COMPONENT_NAME" --arg cv "$CV" \
+                              --arg img "${family_img}:${distro}" --arg distro "${distro}" \
+                              --arg arch "${ARCH}" \
+                              --arg bp "${path}" --arg ts "$APT_TS" --arg rt "$REPO_TYPE" \
+                              '{family:$fam, component:$comp, component_version:$cv,
+                                image:$img, arch:$arch, distro:$distro,
+                                backup_path:$bp, timestamp:$ts, repo_type:$rt}')"
+                          cells="$(jq -c --argjson c "${cell}" '. + [$c]' <<<"${cells}")"
+                      done < <(echo "$APT_TARGETS" | jq -r '.[] | [.distro, .family] | @tsv')
                   fi
 
                   jq -n \
@@ -1063,6 +1145,7 @@ jobs:
                       --arg     push_apt_outcome    "${PUSH_APT_RESULT}" \
                       --argjson dnf_backups         "${dnf_backups}" \
                       --argjson apt_backups         "${apt_backups}" \
+                      --argjson cells               "${cells}" \
                       '{run_id:$run_id, run_attempt:$run_attempt,
                         repo:$repo, tag:$tag, simulated:$simulated,
                         commit_sha:$commit_sha,
@@ -1071,11 +1154,22 @@ jobs:
                         component_buildnum:$component_buildnum,
                         kb_db_release_tag:$kb_db_release_tag,
                         repo_type:$repo_type,
+                        inputs:{component:$component_name,
+                                component_version:$component_version,
+                                component_buildnum:$component_buildnum},
                         timestamps:{dnf:$dnf_timestamp, apt:$apt_timestamp},
                         push_results:{dnf:$push_dnf_outcome, apt:$push_apt_outcome},
-                        backups:{dnf:$dnf_backups, apt:$apt_backups}}' \
+                        backups:{dnf:$dnf_backups, apt:$apt_backups},
+                        cells:$cells}' \
                       > aggregated/manifest.json
                   cat aggregated/manifest.json
+
+                  # Emit compact form for use by pgedge-build-publisher below.
+                  {
+                      echo "manifest_json<<__EOF__"
+                      jq -c '.' aggregated/manifest.json
+                      echo "__EOF__"
+                  } >> "$GITHUB_OUTPUT"
 
             - name: Write step summary
               run: |
@@ -1105,9 +1199,11 @@ jobs:
                       fi
                   } >> "$GITHUB_STEP_SUMMARY"
 
-            - name: Upload aggregated manifest to S3
+            - name: Upload aggregated manifest to S3 (legacy _runs/ path)
               # Skipped on simulate_tag — the manifest still lands as a
               # workflow artifact below for inspection.
+              # Kept alongside the new _pending/ publish (below) so any
+              # external consumer still reading _runs/ keeps working.
               if: github.ref_type == 'tag'
               env:
                   AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1128,6 +1224,40 @@ jobs:
                   aws s3 cp aggregated/manifest.json "s3://${S3_BACKUP_BUCKET}/${key}" \
                       | sed "s|${S3_BACKUP_BUCKET}|<backup-bucket>|g"
                   echo "Aggregated manifest uploaded (key=${key})"
+
+            # ─────────────────────────────────────────────────────────────
+            # New: publish to _pending/ via pgedge-build-publisher so QA team
+            # can certify and the release manager can promote via the shared
+            # qa-certify.yml / promote.yml workflows. Gated on real tag pushes
+            # only — simulated runs never reach the QA queue.
+            # Slack stays off here; the notify-slack job below is the single
+            # source of truth for ai-kb's notifications (preserves the
+            # "Simulated" emoji + cyan color path).
+            # ─────────────────────────────────────────────────────────────
+            - name: Checkout pgedge-build-publisher
+              if: github.ref_type == 'tag'
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p .github/actions
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-build-publisher.git" \
+                      ".github/actions/pgedge-build-publisher"
+
+            - name: Publish manifest to _pending/ for qa-certify
+              if: github.ref_type == 'tag'
+              uses: ./.github/actions/pgedge-build-publisher
+              with:
+                  manifest_json: ${{ steps.build_manifest.outputs.manifest_json }}
+                  s3_backup_bucket: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  repo_type: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  component_name: ${{ env.COMPONENT_NAME }}
+                  # Empty slack_webhook → publisher's Slack step exits silently.
+                  # notify-slack job below handles ai-kb's Slack notifications.
+                  slack_webhook: ''
+                  aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
             - name: Upload aggregated manifest as workflow artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
