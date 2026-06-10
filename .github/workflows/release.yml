@@ -1092,9 +1092,15 @@ jobs:
                   #
                   # OS/distro lists come from the configure job — same source
                   # of truth as the build matrices and push targets.
+                  # Gate on push job result, not timestamp presence: the
+                  # organize step that emits the timestamp runs BEFORE the
+                  # repo-builder / backup actions, so a push that failed at
+                  # the lock or sync step still leaves DNF_TS / APT_TS set.
+                  # Emitting cells[] or backups[] for those would lie to
+                  # downstream qa-certify / promote consumers.
                   dnf_backups='[]'
                   cells='[]'
-                  if [ -n "${DNF_TS}" ]; then
+                  if [ "${PUSH_DNF_RESULT}" = "success" ] && [ -n "${DNF_TS}" ]; then
                       for os in $(echo "$DNF_OS_VERSIONS" | jq -r '.[]'); do
                           path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
                           dnf_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${dnf_backups}")"
@@ -1111,7 +1117,7 @@ jobs:
                   fi
 
                   apt_backups='[]'
-                  if [ -n "${APT_TS}" ]; then
+                  if [ "${PUSH_APT_RESULT}" = "success" ] && [ -n "${APT_TS}" ]; then
                       while IFS=$'\t' read -r distro family_img; do
                           path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
                           apt_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${apt_backups}")"
@@ -1234,8 +1240,14 @@ jobs:
             # source of truth for ai-kb's notifications (preserves the
             # "Simulated" emoji + cyan color path).
             # ─────────────────────────────────────────────────────────────
+            # Publisher gates: only enqueue a QA candidate when at least
+            # one push family actually succeeded — otherwise _pending/ would
+            # accumulate manifests with no publishable artifacts for QA to
+            # certify against.
             - name: Checkout pgedge-build-publisher
-              if: github.ref_type == 'tag'
+              if: |
+                  github.ref_type == 'tag' &&
+                  (needs.push-dnf.result == 'success' || needs.push-apt.result == 'success')
               env:
                   TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
               run: |
@@ -1246,7 +1258,9 @@ jobs:
                       ".github/actions/pgedge-build-publisher"
 
             - name: Publish manifest to _pending/ for qa-certify
-              if: github.ref_type == 'tag'
+              if: |
+                  github.ref_type == 'tag' &&
+                  (needs.push-dnf.result == 'success' || needs.push-apt.result == 'success')
               uses: ./.github/actions/pgedge-build-publisher
               with:
                   manifest_json: ${{ steps.build_manifest.outputs.manifest_json }}
