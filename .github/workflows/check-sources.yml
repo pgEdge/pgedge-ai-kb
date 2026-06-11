@@ -2,9 +2,12 @@ name: Check Sources Against SSOT
 
 # Runs daily (or manually) to detect drift between pgedge-ai-kb-builder.yaml
 # and the canonical sources.yaml in pgEdge/pgedge-doc-sources.
-# If actionable drift is found (missing entries or SSH URLs), opens or updates
-# a dedicated fix PR on auto/sync-kb-builder. Never comments on developer PRs.
-# EXTRA and policy-excluded entries are reported but never auto-removed.
+# If actionable drift is found (missing entries, SSH URLs, or versioned entries
+# removed from SSOT), opens or updates a dedicated fix PR on auto/sync-kb-builder.
+# Never comments on developer PRs. Versioned EXTRA entries (those with a
+# project_version that no longer exist in SSOT) are auto-removed; living/
+# unversioned sources (branch refs with no project_version) and policy-excluded
+# entries (beyond max_versions but still in SSOT) are reported but never removed.
 
 on:
   #schedule:
@@ -126,6 +129,13 @@ jobs:
           extra_entries   = {k: s for k, s in consumer_map.items() if k not in ssot_map and k not in excluded}
           policy_entries  = {k: s for k, s in consumer_map.items() if k in excluded}
 
+          # EXTRA entries that carry a project_version are concrete versions that
+          # were deleted from SSOT — prune them. EXTRA entries without a version
+          # (living/self sources like branch=main) are preserved, mirroring the
+          # never-prune policy for Development/living entries elsewhere.
+          removable_extra = {k: s for k, s in extra_entries.items() if s.get("project_version")}
+          kept_extra      = {k: s for k, s in extra_entries.items() if not s.get("project_version")}
+
           # ── Build drift report ──────────────────────────────────────────
           lines = ["## Sources Drift Report — kb-builder\n"]
           clean = not missing_entries and not extra_entries and not url_issues
@@ -139,10 +149,15 @@ jobs:
               f"ref `{k[1]}`, doc_path `{k[2]}`"
               for k, e in missing_entries.items()
           ]
+          removed_lines = [
+              f"  - **REMOVED** `{s.get('project_name','?')}` "
+              f"v{s.get('project_version','?')} — ref `{k[1]}`, doc_path `{k[2]}` (deleted from SSOT)"
+              for k, s in removable_extra.items()
+          ]
           extra_lines = [
               f"  - **EXTRA** `{s.get('project_name','?')}` — "
-              f"ref `{k[1]}`, doc_path `{k[2]}` (not in SSOT, left as-is)"
-              for k, s in extra_entries.items()
+              f"ref `{k[1]}`, doc_path `{k[2]}` (unversioned/living, not in SSOT — left as-is)"
+              for k, s in kept_extra.items()
           ]
           policy_lines = [
               f"  - **POLICY-EXCLUDED** `{s.get('project_name','?')}` "
@@ -150,7 +165,7 @@ jobs:
               for k, s in policy_entries.items()
           ]
 
-          actionable = bool(missing_entries or url_issues)
+          actionable = bool(missing_entries or url_issues or removable_extra)
 
           if clean:
               lines.append("**No drift detected.** Consumer config is in sync with SSOT.")
@@ -159,16 +174,18 @@ jobs:
                   lines += ["### URL Issues (SSH → HTTPS)\n"] + url_lines + [""]
               if missing_lines:
                   lines += ["### Missing from consumer (in SSOT, absent here)\n"] + missing_lines + [""]
+              if removed_lines:
+                  lines += ["### Removed from consumer (versions deleted from SSOT)\n"] + removed_lines + [""]
               if extra_lines:
-                  lines += ["### Extra in consumer (not in SSOT — left as-is)\n"] + extra_lines + [""]
+                  lines += ["### Extra in consumer (unversioned/living, not in SSOT — left as-is)\n"] + extra_lines + [""]
 
           if policy_lines:
               lines += ["### Policy-excluded versions present in consumer (informational)\n"] + policy_lines + [""]
 
           if not clean:
               lines += ["---",
-                        f"*{len(missing_entries)} missing, {len(extra_entries)} extra, "
-                        f"{len(url_issues)} URL issue(s)*"]
+                        f"*{len(missing_entries)} missing, {len(removable_extra)} removed, "
+                        f"{len(kept_extra)} extra, {len(url_issues)} URL issue(s)*"]
 
           report = "\n".join(lines) + "\n"
           with open("/tmp/drift-report.md", "w") as f:
@@ -280,6 +297,42 @@ jobs:
                       else:
                           group_text = grp["comment"] + "".join(grp["blocks"])
                           fixed = fixed[:sources_end] + "\n" + group_text + "\n" + fixed[sources_end:]
+
+              # Remove versioned EXTRA entries (versions deleted from SSOT). Blocks
+              # are parsed by indentation: a "- git_url:" line plus its 6-space
+              # field lines. This never disturbs trailing comments or local_path
+              # examples, which are not 6-space field lines under a git_url block.
+              if removable_extra:
+                  rm_keys = set(removable_extra.keys())
+                  sm = re.search(r'(?m)^sources:\s*(?:#.*)?$', fixed)
+                  if sm:
+                      ns    = re.search(r'(?m)^(?!\s|#)[^:\n]+:', fixed[sm.end():])
+                      after = sm.end()
+                      end   = sm.end() + ns.start() if ns else len(fixed)
+                      head, body, tail = fixed[:after], fixed[after:end], fixed[end:]
+                      blines = body.split("\n")
+                      out, i, n = [], 0, len(blines)
+                      while i < n:
+                          if not re.match(r'^    - git_url:\s*"', blines[i]):
+                              out.append(blines[i]); i += 1; continue
+                          j = i + 1
+                          while j < n and re.match(r'^      \S', blines[j]):
+                              j += 1
+                          blk = "\n".join(blines[i:j])
+                          gm  = re.search(r'git_url:\s*"([^"]+)"', blk)
+                          rfm = re.search(r'(?:tag|branch):\s*"([^"]*)"', blk)
+                          dm  = re.search(r'doc_path:\s*"([^"]*)"', blk)
+                          key = (normalize_url(gm.group(1)) if gm else "",
+                                 rfm.group(1) if rfm else "",
+                                 dm.group(1)  if dm  else "")
+                          if key in rm_keys:
+                              if j < n and blines[j].strip() == "":
+                                  j += 1   # also drop the one blank separator line
+                              i = j
+                              continue
+                          out.extend(blines[i:j])
+                          i = j
+                      fixed = head + "\n".join(out) + tail
 
               with open(CONSUMER_FILE, "w") as f:
                   f.write(fixed)
