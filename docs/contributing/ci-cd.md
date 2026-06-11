@@ -83,16 +83,25 @@ default) and:
 1. Fetches the SSOT `sources.yaml` using the
    `PGEDGE_BUILDER_TOKEN` secret.
 
-2. Detects missing entries and SSH URLs that need conversion to
-   HTTPS.
+2. Detects missing entries, SSH URLs that need conversion to HTTPS,
+   and versioned entries that have been removed from the SSOT.
 
 3. Generates a fix patch on the `auto/sync-kb-builder` branch and
    opens or updates a pull request when actionable drift exists.
 
-The workflow never comments on developer pull requests. Items that
-are in the consumer but absent from the SSOT, or excluded by
-`max_versions` policy, are reported in the drift report but not
-auto-removed.
+The workflow never comments on developer pull requests. Consumer
+entries that are absent from the SSOT are handled by kind:
+
+- Versioned entries (those carrying a `project_version`) that no
+  longer exist in the SSOT are auto-removed — for example, a patch
+  release that the SSOT has bumped past.
+
+- Living/unversioned sources (branch refs with no `project_version`,
+  such as `branch: main` self-references) are reported but never
+  removed.
+
+- Policy-excluded versions (still in the SSOT but beyond a
+  component's `max_versions` cutoff) are reported but never removed.
 
 ## Secrets
 
