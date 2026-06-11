@@ -9,22 +9,10 @@ doc_source_path: "bin/doc-source"
 # Documentation sources
 sources:
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_18_3"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "18"
-
-    - git_url: "https://github.com/postgres/postgres.git"
       tag: "REL_18_4"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "18"
-
-    - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_17_9"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "17"
 
     - git_url: "https://github.com/postgres/postgres.git"
       tag: "REL_17_10"
@@ -33,34 +21,16 @@ sources:
       project_version: "17"
 
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_16_13"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "16"
-
-    - git_url: "https://github.com/postgres/postgres.git"
       tag: "REL_16_14"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "16"
 
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_15_17"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "15"
-
-    - git_url: "https://github.com/postgres/postgres.git"
       tag: "REL_15_18"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "15"
-
-    - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_14_22"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "14"
 
     - git_url: "https://github.com/postgres/postgres.git"
       tag: "REL_14_23"
@@ -86,30 +56,12 @@ sources:
       project_name: "pgAdmin 4"
       project_version: "9.11"
 
-    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
-      tag: "v1.0.0-rc1"
-      doc_path: "docs"
-      project_name: "pgEdge AI DBA Workbench"
-      project_version: "1.0.0-rc1"
 
     - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
-      tag: "v1.0.0-beta3"
+      tag: "v1.0.0"
       doc_path: "docs"
       project_name: "pgEdge AI DBA Workbench"
-      project_version: "1.0.0-beta3"
-
-    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
-      tag: "v1.0.0-beta2"
-      doc_path: "docs"
-      project_name: "pgEdge AI DBA Workbench"
-      project_version: "1.0.0-beta2"
-
-    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
-      tag: "v1.0.0-beta1"
-      doc_path: "docs"
-      project_name: "pgEdge AI DBA Workbench"
-      project_version: "1.0.0-beta1"
-
+      project_version: "1.0.0"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "patroni413"
       doc_path: "docs"
@@ -196,12 +148,6 @@ sources:
       doc_path: "docs"
       project_name: "Spock"
       project_version: "5.0.8"
-
-    - git_url: "https://github.com/pgEdge/spock.git"
-      tag: "v5.0.7"
-      doc_path: "docs"
-      project_name: "Spock"
-      project_version: "5.0.7"
 
     - git_url: "https://github.com/pgEdge/spock.git"
       tag: "v5.0.6"
