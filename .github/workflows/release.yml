@@ -37,52 +37,48 @@ jobs:
     # this job's outputs. No other place in the workflow hardcodes a list.
     # =========================================================================
 
-    configure:
-        name: Resolve platforms + architectures
+    # =========================================================================
+    # Build matrix — delegated to pgedge-detect-build-matrix so this workflow
+    # shares the same cell schema as the unified extension pipeline.  pkg/ is
+    # pg-agnostic (no PER_PG_VERSION, not postgresql-N / libpq / pgedge-*),
+    # so the action emits cells with empty pg_version and pg_in_name=false.
+    # ai-kb is noarch (data-only kb.db) — single amd64 build covers all.
+    # =========================================================================
+    detect-matrix:
+        name: Detect build matrix
         runs-on: ubuntu-latest
         outputs:
-            arch:            ${{ steps.cfg.outputs.arch }}
-            dnf_os_versions: ${{ steps.cfg.outputs.dnf_os_versions }}
-            apt_targets:     ${{ steps.cfg.outputs.apt_targets }}
+            rpm_matrix: ${{ steps.detect.outputs.rpm_matrix }}
+            deb_matrix: ${{ steps.detect.outputs.deb_matrix }}
+            has_rpm:    ${{ steps.detect.outputs.has_rpm }}
+            has_deb:    ${{ steps.detect.outputs.has_deb }}
+            dnf_ts:     ${{ steps.detect.outputs.dnf_ts }}
+            apt_ts:     ${{ steps.detect.outputs.apt_ts }}
         steps:
-            - id: cfg
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Checkout pgedge-detect-build-matrix
+              env:
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
               run: |
                   set -euo pipefail
-                  # ─── EDIT HERE to add/remove platforms ──────────────────
-                  # Build packages are noarch (data-only kb.db), so a single
-                  # arch covers all targets. Change to an array if any future
-                  # package becomes arch-specific.
-                  arch='amd64'
+                  mkdir -p .github/actions
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-detect-build-matrix.git" \
+                      ".github/actions/pgedge-detect-build-matrix"
 
-                  # DNF: EL major versions to build for.
-                  dnf_os_versions='["9","10"]'
-
-                  # APT: distro + image-family pairs. family becomes the
-                  # Docker image prefix (ubuntu: vs debian:).
-                  apt_targets='[
-                    {"distro":"jammy",   "family":"ubuntu"},
-                    {"distro":"noble",   "family":"ubuntu"},
-                    {"distro":"bullseye","family":"debian"},
-                    {"distro":"bookworm","family":"debian"},
-                    {"distro":"trixie",  "family":"debian"}
-                  ]'
-
-                  # ─── End of editable section ────────────────────────────
-                  # Emit as GITHUB_OUTPUT (multi-line JSON via heredoc).
-                  # fromJSON() doesn't care about whitespace, so we don't
-                  # need to compact the apt_targets value here.
-                  {
-                      echo "arch=${arch}"
-                      echo "dnf_os_versions=${dnf_os_versions}"
-                      echo "apt_targets<<__APT_TARGETS_EOF__"
-                      echo "${apt_targets}"
-                      echo "__APT_TARGETS_EOF__"
-                  } >> "$GITHUB_OUTPUT"
-
-                  echo "Resolved platforms:"
-                  echo "  arch=${arch}"
-                  echo "  dnf_os_versions=${dnf_os_versions}"
-                  echo "  apt_targets=$(echo "${apt_targets}" | jq -c '.')"
+            - name: Detect build matrix
+              id: detect
+              uses: ./.github/actions/pgedge-detect-build-matrix
+              with:
+                  component_name: pkg
+                  # ai-kb is noarch: build the spec once on amd64; the RPM/
+                  # DEB are arch-independent. arm64 would just produce a
+                  # bit-identical copy.
+                  archs: '["amd64"]'
+                  rpm_images: '["almalinux:9","almalinux:10"]'
+                  deb_images: '["ubuntu:jammy","ubuntu:noble","debian:bullseye","debian:bookworm","debian:trixie"]'
 
     # =========================================================================
     # Binary builds (unchanged from prior version)
@@ -245,74 +241,51 @@ jobs:
         # end-to-end packaging tests without touching S3 / live repos.
         if: github.ref_type == 'tag' || github.event.inputs.simulate_tag != ''
         outputs:
-            repo-type: ${{ steps.ctx.outputs.repo-type }}
-            component-version: ${{ steps.ctx.outputs.component-version }}
-            component-buildnum: ${{ steps.ctx.outputs.component-buildnum }}
-            effective-tag: ${{ steps.ctx.outputs.effective-tag }}
-            simulated: ${{ steps.ctx.outputs.simulated }}
+            repo-type:          ${{ steps.route.outputs.repo_type }}
+            component-version:  ${{ steps.parse.outputs.version }}
+            component-buildnum: ${{ steps.parse.outputs.buildnum }}
+            effective-tag:      ${{ steps.parse.outputs.effective_tag }}
+            simulated:          ${{ steps.parse.outputs.simulated }}
         steps:
-            - name: Checkout code
-              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-            - name: Parse tag and source pkg/common.sh
-              id: ctx
+            - name: Checkout pgedge-parse-release-tag
               env:
-                  SIMULATE_TAG: ${{ github.event.inputs.simulate_tag }}
+                  TOKEN: ${{ secrets.PGEDGE_BUILDER_TOKEN }}
               run: |
                   set -euo pipefail
+                  mkdir -p .github/actions
+                  git clone --depth 1 \
+                      "https://x-access-token:${TOKEN}@github.com/pgEdge/pgedge-parse-release-tag.git" \
+                      ".github/actions/pgedge-parse-release-tag"
 
-                  # Pick the effective tag: simulate_tag input wins if non-empty,
-                  # otherwise the real pushed tag. The if-guard above ensures
-                  # at least one is set when we get here.
-                  if [ -n "${SIMULATE_TAG}" ]; then
-                      effective_tag="${SIMULATE_TAG}"
-                      simulated=true
-                      echo "::notice::Simulated tag mode — using ${effective_tag}"
-                  else
-                      effective_tag="${GITHUB_REF_NAME}"
-                      simulated=false
-                  fi
+            - name: Parse release tag
+              id: parse
+              uses: ./.github/actions/pgedge-parse-release-tag
+              with:
+                  simulate_tag: ${{ github.event.inputs.simulate_tag }}
 
-                  case "${effective_tag}" in
-                      v*-test*|v*-dev*)
-                          repo_type=daily
-                          ;;
-                      v*-rc*|v*-beta*|v*-alpha*|v*)
-                          repo_type=staging
-                          ;;
+            - name: Route suffix → repo_type
+              id: route
+              env:
+                  # Both passed via env: so a hostile tag value can't be
+                  # template-substituted into the shell body.
+                  SUFFIX:        ${{ steps.parse.outputs.suffix }}
+                  EFFECTIVE_TAG: ${{ steps.parse.outputs.effective_tag }}
+              run: |
+                  set -euo pipefail
+                  # Routing is policy and stays per-repo — different
+                  # components may legitimately route differently. Adjust
+                  # this case statement to change ai-kb's mapping; other
+                  # consumers of pgedge-parse-release-tag are unaffected.
+                  case "$SUFFIX" in
+                      test*|dev*)            repo_type=daily   ;;
+                      rc*|beta*|alpha*|"")   repo_type=staging ;;
                       *)
-                          echo "::error::Unsupported tag pattern: ${effective_tag}"
+                          echo "::error::Unsupported suffix '$SUFFIX' (effective tag: $EFFECTIVE_TAG)"
                           exit 1
                           ;;
                   esac
-
-                  # Extract version + buildnum from the tag.
-                  #   v1.0.0          -> cv=1.0.0      cbn=1
-                  #   v1.0.0-beta1    -> cv=1.0.0      cbn=beta1_1
-                  #   v0.0.1-test1    -> cv=0.0.1      cbn=test1_1
-                  # The trailing "_1" is the package-iteration counter; bump
-                  # COMPONENT_BUILDNUM manually if a second build of the same
-                  # upstream tag is ever needed.
-                  ref="${effective_tag#v}"
-                  if [[ "${ref}" == *-* ]]; then
-                      cv="${ref%%-*}"
-                      cbn="${ref#*-}_1"
-                  else
-                      cv="${ref}"
-                      cbn="1"
-                  fi
-
-                  echo "repo-type=${repo_type}"         >> "$GITHUB_OUTPUT"
-                  echo "component-version=${cv}"        >> "$GITHUB_OUTPUT"
-                  echo "component-buildnum=${cbn}"      >> "$GITHUB_OUTPUT"
-                  echo "effective-tag=${effective_tag}" >> "$GITHUB_OUTPUT"
-                  echo "simulated=${simulated}"         >> "$GITHUB_OUTPUT"
-
-                  echo "Tag:                ${effective_tag}"
-                  echo "Simulated:          ${simulated}"
-                  echo "Repo type:          ${repo_type}"
-                  echo "Component version:  ${cv}"
-                  echo "Component buildnum: ${cbn}"
+                  echo "repo_type=$repo_type" >> "$GITHUB_OUTPUT"
+                  echo "Routed suffix '$SUFFIX' → repo_type=$repo_type"
 
     # -------------------------------------------------------------------------
     # kb.db sourcing — either generate inline or discover latest published.
@@ -649,8 +622,8 @@ jobs:
     # -------------------------------------------------------------------------
 
     package-rpm:
-        name: Package RPM (el${{ matrix.os_version }} noarch)
-        needs: [configure, determine-repo-type, validate-kb-db]
+        name: Package RPM (${{ matrix.image }} noarch)
+        needs: [detect-matrix, determine-repo-type, validate-kb-db]
         # always() + explicit needs check is required because validate-kb-db
         # has an OR'd dependency (generate-kb-db || discover-kb-db) and the
         # default success() check would mistakenly propagate the SKIPPED
@@ -658,30 +631,33 @@ jobs:
         if: |
             always() &&
             needs.determine-repo-type.result == 'success' &&
-            needs.validate-kb-db.result == 'success'
+            needs.detect-matrix.result == 'success' &&
+            needs.validate-kb-db.result == 'success' &&
+            needs.detect-matrix.outputs.has_rpm == 'true'
         runs-on: ubuntu-latest
-        # Package is noarch (data-only kb.db). One cell per EL major; built
-        # on the configured arch (default amd64) since the resulting RPM is
-        # arch-independent. EL-major list comes from configure.dnf_os_versions.
+        # Package is noarch (data-only kb.db).  One cell per EL major;
+        # built on amd64 (detect-matrix configured archs:["amd64"]) since
+        # the resulting RPM is arch-independent.
         strategy:
             fail-fast: false
-            matrix:
-                os_version: ${{ fromJSON(needs.configure.outputs.dnf_os_versions) }}
+            matrix: ${{ fromJSON(needs.detect-matrix.outputs.rpm_matrix) }}
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
             KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
-            ARCH: ${{ needs.configure.outputs.arch }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-            - name: Compute per-cell vars
-              id: vars
+            - name: Derive os_version from image
+              id: cell
+              env:
+                  IMAGE: ${{ matrix.image }}
               run: |
                   set -euo pipefail
-                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+                  os_version="${IMAGE##*:}"
+                  echo "os_version=${os_version}" >> "$GITHUB_OUTPUT"
 
             - name: Download validated kb.db
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -704,8 +680,8 @@ jobs:
             - name: Build RPM
               uses: ./.github/actions/pgedge-builder-action
               with:
-                  image: almalinux:${{ matrix.os_version }}
-                  arch: ${{ env.ARCH }}
+                  image: ${{ matrix.image }}
+                  arch: ${{ matrix.arch }}
                   component_name: pkg
                   component_version: ${{ env.COMPONENT_VERSION }}
                   component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
@@ -717,8 +693,8 @@ jobs:
             - name: Upload RPM cell artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: rpm__el-${{ matrix.os_version }}
-                  path: output/el${{ matrix.os_version }}-${{ env.ARCH }}/
+                  name: rpm__el-${{ steps.cell.outputs.os_version }}
+                  path: output/el${{ steps.cell.outputs.os_version }}-${{ matrix.arch }}/
                   retention-days: 7
 
     push-dnf:
@@ -730,24 +706,25 @@ jobs:
             always() && github.ref_type == 'tag' &&
             (needs.package-rpm.result == 'success' ||
              (github.event.inputs.force_push == 'true' && needs.package-rpm.result != 'cancelled'))
-        needs: [configure, determine-repo-type, package-rpm]
+        needs: [detect-matrix, determine-repo-type, package-rpm]
         runs-on: ubuntu-latest
-        # Single job across all EL majors. Steps below invoke the dnf repo
-        # builder once per major sequentially so two majors never write to S3
-        # at the same time. Concurrency groups one push job per repo-type so
-        # two simultaneous tag pushes serialize at the bucket boundary.
+        # Single job across all EL majors.  Concurrency groups one push job
+        # per repo-type so two simultaneous tag pushes serialize at the
+        # bucket boundary.
         concurrency:
             group: dnf-push-${{ needs.determine-repo-type.outputs.repo-type }}
             cancel-in-progress: false
-        # Timestamp is the one passed to pgedge-backup-artifacts, so the
-        # published manifest references the exact S3 prefix written.
+        # Timestamp comes from detect-matrix so push-dnf and push-apt get
+        # distinct values (the action sleeps 20s between dnf_ts and apt_ts);
+        # generating one here at organize-time could collide with push-apt's
+        # when both jobs start in the same second.
         outputs:
-            timestamp: ${{ steps.organize.outputs.timestamp }}
+            timestamp: ${{ needs.detect-matrix.outputs.dnf_ts }}
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_NAME: ${{ github.event.repository.name }}
-            DNF_OS_VERSIONS: ${{ needs.configure.outputs.dnf_os_versions }}
+            RPM_MATRIX: ${{ needs.detect-matrix.outputs.rpm_matrix }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -762,12 +739,11 @@ jobs:
                   merge-multiple: false
 
             - name: Organize RPMs by EL major
-              id: organize
               run: |
                   set -euo pipefail
-                  # OS list comes from the configure job — edit
-                  # configure.outputs.dnf_os_versions to add/remove an EL major.
-                  for os_version in $(echo "$DNF_OS_VERSIONS" | jq -r '.[]'); do
+                  # OS list comes from the detect-matrix rpm_matrix.include
+                  # cells (image='almalinux:N' → os_version=N).
+                  for os_version in $(echo "$RPM_MATRIX" | jq -r '[.include[].image | split(":")[1]] | unique | .[]'); do
                       mkdir -p "rpms-el${os_version}"
                       src_dir="rpm-artifacts/rpm__el-${os_version}"
                       if [ -d "${src_dir}" ]; then
@@ -777,18 +753,16 @@ jobs:
                       echo "EL${os_version}: ${count} RPMs"
                   done
                   rm -rf rpm-artifacts
-                  # Single timestamp shared by all backups in this push job.
-                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Build targets JSON for push + backup
               id: targets
               run: |
                   set -euo pipefail
-                  # push targets: {"os-version", "rpm-dir"}
-                  push=$(echo "$DNF_OS_VERSIONS" \
+                  os_versions=$(echo "$RPM_MATRIX" \
+                      | jq -c '[.include[].image | split(":")[1]] | unique')
+                  push=$(echo "$os_versions" \
                       | jq -c 'map({"os-version": ., "rpm-dir": ("rpms-el" + .)})')
-                  # backup targets: {"os-version", "output-dir"}
-                  backup=$(echo "$DNF_OS_VERSIONS" \
+                  backup=$(echo "$os_versions" \
                       | jq -c 'map({"os-version": ., "output-dir": ("rpms-el" + .)})')
                   echo "push=${push}"     >> "$GITHUB_OUTPUT"
                   echo "backup=${backup}" >> "$GITHUB_OUTPUT"
@@ -831,53 +805,49 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
-                  # mktemp -d inside the action gives each target its own
-                  # staging dir; the old "Reset backup staging dir" steps
-                  # are no longer needed.
+                  timestamp: ${{ needs.detect-matrix.outputs.dnf_ts }}
                   targets: ${{ steps.targets.outputs.backup }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # No manifest writes here — publish-manifest reconstructs backup
-            # paths from this job's timestamp output.
 
     # -------------------------------------------------------------------------
     # DEB packaging
     # -------------------------------------------------------------------------
 
     package-deb:
-        name: Package DEB (${{ matrix.family }}:${{ matrix.distro }} all)
-        needs: [configure, determine-repo-type, validate-kb-db]
+        name: Package DEB (${{ matrix.image }} all)
+        needs: [detect-matrix, determine-repo-type, validate-kb-db]
         # See package-rpm for why always() + explicit needs check is needed.
         if: |
             always() &&
             needs.determine-repo-type.result == 'success' &&
-            needs.validate-kb-db.result == 'success'
+            needs.detect-matrix.result == 'success' &&
+            needs.validate-kb-db.result == 'success' &&
+            needs.detect-matrix.outputs.has_deb == 'true'
         runs-on: ubuntu-latest
-        # Package is Architecture: all (data-only kb.db). One cell per distro;
-        # built on amd64 runner since the resulting DEB is arch-independent.
-        # Distro list comes from the configure job — edit
-        # configure.outputs.apt_targets to add/remove a distro.
+        # Package is Architecture: all (data-only kb.db).  One cell per
+        # distro; built on amd64 runner since the resulting DEB is arch-
+        # independent.  Distro list comes from detect-matrix.
         strategy:
             fail-fast: false
-            matrix:
-                include: ${{ fromJSON(needs.configure.outputs.apt_targets) }}
+            matrix: ${{ fromJSON(needs.detect-matrix.outputs.deb_matrix) }}
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_BUILDNUM: ${{ needs.determine-repo-type.outputs.component-buildnum }}
             KB_TAG: ${{ needs.validate-kb-db.outputs.kb-db-release-tag }}
-            ARCH: ${{ needs.configure.outputs.arch }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-            - name: Compute per-cell vars
-              id: vars
+            - name: Derive distro from image
+              id: cell
+              env:
+                  IMAGE: ${{ matrix.image }}
               run: |
                   set -euo pipefail
-                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+                  distro="${IMAGE##*:}"
+                  echo "distro=${distro}" >> "$GITHUB_OUTPUT"
 
             - name: Download validated kb.db
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -900,8 +870,8 @@ jobs:
             - name: Build DEB
               uses: ./.github/actions/pgedge-builder-action
               with:
-                  image: ${{ matrix.family }}:${{ matrix.distro }}
-                  arch: ${{ env.ARCH }}
+                  image: ${{ matrix.image }}
+                  arch: ${{ matrix.arch }}
                   component_name: pkg
                   component_version: ${{ env.COMPONENT_VERSION }}
                   component_buildnum: ${{ env.COMPONENT_BUILDNUM }}
@@ -913,8 +883,8 @@ jobs:
             - name: Upload DEB cell artifact
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: deb__${{ matrix.distro }}
-                  path: output/${{ matrix.distro }}-${{ env.ARCH }}/
+                  name: deb__${{ steps.cell.outputs.distro }}
+                  path: output/${{ steps.cell.outputs.distro }}-${{ matrix.arch }}/
                   retention-days: 7
 
     push-apt:
@@ -925,22 +895,23 @@ jobs:
             always() && github.ref_type == 'tag' &&
             (needs.package-deb.result == 'success' ||
              (github.event.inputs.force_push == 'true' && needs.package-deb.result != 'cancelled'))
-        needs: [configure, determine-repo-type, package-deb]
+        needs: [detect-matrix, determine-repo-type, package-deb]
         runs-on: ubuntu-latest
-        # Single job across all distros. Push + backup are invoked once per
-        # distro sequentially below; no parallel writes to the apt S3 bucket.
+        # Single job across all distros.  Concurrency groups one push job
+        # per repo-type so two simultaneous tag pushes serialize at the
+        # bucket boundary.
         concurrency:
             group: apt-push-${{ needs.determine-repo-type.outputs.repo-type }}
             cancel-in-progress: false
-        # Timestamp differs from push-dnf's; each push job picks its own on
-        # entry, matching the unified workflow's per-family timestamp.
+        # Sourced from detect-matrix — see push-dnf for the rationale on
+        # why this isn't generated at organize-time.
         outputs:
-            timestamp: ${{ steps.organize.outputs.timestamp }}
+            timestamp: ${{ needs.detect-matrix.outputs.apt_ts }}
         env:
             REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
             COMPONENT_VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
             COMPONENT_NAME: ${{ github.event.repository.name }}
-            APT_TARGETS: ${{ needs.configure.outputs.apt_targets }}
+            DEB_MATRIX: ${{ needs.detect-matrix.outputs.deb_matrix }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -953,12 +924,11 @@ jobs:
                   merge-multiple: false
 
             - name: Organize DEBs by distro
-              id: organize
               run: |
                   set -euo pipefail
-                  # Distro list comes from the configure job — edit
-                  # configure.outputs.apt_targets to add/remove a distro.
-                  for distro in $(echo "$APT_TARGETS" | jq -r '.[].distro'); do
+                  # Distro list comes from detect-matrix's deb_matrix cells
+                  # (image='ubuntu:jammy' → distro=jammy).
+                  for distro in $(echo "$DEB_MATRIX" | jq -r '[.include[].image | split(":")[1]] | unique | .[]'); do
                       mkdir -p "debs-${distro}"
                       src_dir="deb-artifacts/deb__${distro}"
                       if [ -d "${src_dir}" ]; then
@@ -968,18 +938,19 @@ jobs:
                       echo "${distro}: ${count} DEBs"
                   done
                   rm -rf deb-artifacts
-                  echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
 
             - name: Build targets JSON for push + backup
               id: targets
               run: |
                   set -euo pipefail
-                  # push targets: {"os-name": "<family>:<distro>", "deb-dir": "debs-<distro>"}
-                  push=$(echo "$APT_TARGETS" \
-                      | jq -c 'map({"os-name": (.family + ":" + .distro), "deb-dir": ("debs-" + .distro)})')
-                  # backup targets: {"os-version": "<distro>", "output-dir": "debs-<distro>"}
-                  backup=$(echo "$APT_TARGETS" \
-                      | jq -c 'map({"os-version": .distro, "output-dir": ("debs-" + .distro)})')
+                  # Unique images carry both family + distro; the action
+                  # takes "<family>:<distro>" as os-name.
+                  unique_images=$(echo "$DEB_MATRIX" \
+                      | jq -c '[.include[].image] | unique')
+                  push=$(echo "$unique_images" \
+                      | jq -c 'map({"os-name": ., "deb-dir": ("debs-" + (. | split(":")[1]))})')
+                  backup=$(echo "$unique_images" \
+                      | jq -c 'map({"os-version": (. | split(":")[1]), "output-dir": ("debs-" + (. | split(":")[1]))})')
                   echo "push=${push}"     >> "$GITHUB_OUTPUT"
                   echo "backup=${backup}" >> "$GITHUB_OUTPUT"
 
@@ -1023,16 +994,10 @@ jobs:
                   repo-type: ${{ env.REPO_TYPE }}
                   component-name: ${{ env.COMPONENT_NAME }}
                   component-version: ${{ env.COMPONENT_VERSION }}
-                  timestamp: ${{ steps.organize.outputs.timestamp }}
-                  # mktemp -d inside the action gives each target its own
-                  # staging dir; the old "Reset backup staging dir" steps
-                  # are no longer needed.
+                  timestamp: ${{ needs.detect-matrix.outputs.apt_ts }}
                   targets: ${{ steps.targets.outputs.backup }}
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-            # No manifest writes here — publish-manifest reconstructs backup
-            # paths from this job's timestamp output.
 
     # -------------------------------------------------------------------------
     # Aggregated manifest for the future promotion tool
@@ -1040,7 +1005,7 @@ jobs:
 
     publish-manifest:
         name: Publish aggregated backup manifest
-        needs: [configure, determine-repo-type, validate-kb-db, push-dnf, push-apt]
+        needs: [detect-matrix, determine-repo-type, validate-kb-db, push-dnf, push-apt]
         if: always() && needs.determine-repo-type.result == 'success'
         runs-on: ubuntu-latest
         env:
@@ -1066,9 +1031,8 @@ jobs:
                   PUSH_APT_RESULT:  ${{ needs.push-apt.result }}
                   DNF_TS:           ${{ needs.push-dnf.outputs.timestamp }}
                   APT_TS:           ${{ needs.push-apt.outputs.timestamp }}
-                  ARCH:             ${{ needs.configure.outputs.arch }}
-                  DNF_OS_VERSIONS:  ${{ needs.configure.outputs.dnf_os_versions }}
-                  APT_TARGETS:      ${{ needs.configure.outputs.apt_targets }}
+                  RPM_MATRIX:       ${{ needs.detect-matrix.outputs.rpm_matrix }}
+                  DEB_MATRIX:       ${{ needs.detect-matrix.outputs.deb_matrix }}
               run: |
                   set -euo pipefail
                   mkdir -p aggregated
@@ -1090,47 +1054,46 @@ jobs:
                   #   cells[]:           per-OS/per-distro records that
                   #     qa-certify/promote.yml read to build their matrices
                   #
-                  # OS/distro lists come from the configure job — same source
-                  # of truth as the build matrices and push targets.
-                  # Gate on push job result, not timestamp presence: the
-                  # organize step that emits the timestamp runs BEFORE the
-                  # repo-builder / backup actions, so a push that failed at
-                  # the lock or sync step still leaves DNF_TS / APT_TS set.
-                  # Emitting cells[] or backups[] for those would lie to
-                  # downstream qa-certify / promote consumers.
+                  # OS/distro lists come from the detect-matrix outputs —
+                  # same source of truth as the build matrices and push
+                  # targets.  Gate on push job result, not timestamp
+                  # presence: detect-matrix emits dnf_ts/apt_ts at workflow
+                  # start, before any push has a chance to fail.  Emitting
+                  # cells[] for failed pushes would lie to downstream
+                  # qa-certify / promote consumers.
                   dnf_backups='[]'
                   cells='[]'
                   if [ "${PUSH_DNF_RESULT}" = "success" ] && [ -n "${DNF_TS}" ]; then
-                      for os in $(echo "$DNF_OS_VERSIONS" | jq -r '.[]'); do
+                      while IFS=$'\t' read -r image os arch; do
                           path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${DNF_TS}/dnf/${os}/"
-                          dnf_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${dnf_backups}")"
+                          dnf_backups="$(jq -c --arg p "${path}" '. + [$p] | unique' <<<"${dnf_backups}")"
                           cell="$(jq -nc \
                               --arg fam rpm --arg comp "$COMPONENT_NAME" --arg cv "$CV" \
-                              --arg img "almalinux:${os}" --arg ver "${os}" \
-                              --arg arch "${ARCH}" \
+                              --arg img "${image}" --arg ver "${os}" \
+                              --arg arch "${arch}" \
                               --arg bp "${path}" --arg ts "$DNF_TS" --arg rt "$REPO_TYPE" \
                               '{family:$fam, component:$comp, component_version:$cv,
                                 image:$img, arch:$arch, os_version:$ver,
                                 backup_path:$bp, timestamp:$ts, repo_type:$rt}')"
                           cells="$(jq -c --argjson c "${cell}" '. + [$c]' <<<"${cells}")"
-                      done
+                      done < <(echo "$RPM_MATRIX" | jq -r '.include[] | [.image, (.image | split(":")[1]), .arch] | @tsv')
                   fi
 
                   apt_backups='[]'
                   if [ "${PUSH_APT_RESULT}" = "success" ] && [ -n "${APT_TS}" ]; then
-                      while IFS=$'\t' read -r distro family_img; do
+                      while IFS=$'\t' read -r image distro arch; do
                           path="${REPO_TYPE}/${COMPONENT_NAME}/${CV}/${APT_TS}/apt/${distro}/"
-                          apt_backups="$(jq -c --arg p "${path}" '. + [$p]' <<<"${apt_backups}")"
+                          apt_backups="$(jq -c --arg p "${path}" '. + [$p] | unique' <<<"${apt_backups}")"
                           cell="$(jq -nc \
                               --arg fam deb --arg comp "$COMPONENT_NAME" --arg cv "$CV" \
-                              --arg img "${family_img}:${distro}" --arg distro "${distro}" \
-                              --arg arch "${ARCH}" \
+                              --arg img "${image}" --arg distro "${distro}" \
+                              --arg arch "${arch}" \
                               --arg bp "${path}" --arg ts "$APT_TS" --arg rt "$REPO_TYPE" \
                               '{family:$fam, component:$comp, component_version:$cv,
                                 image:$img, arch:$arch, distro:$distro,
                                 backup_path:$bp, timestamp:$ts, repo_type:$rt}')"
                           cells="$(jq -c --argjson c "${cell}" '. + [$c]' <<<"${cells}")"
-                      done < <(echo "$APT_TARGETS" | jq -r '.[] | [.distro, .family] | @tsv')
+                      done < <(echo "$DEB_MATRIX" | jq -r '.include[] | [.image, (.image | split(":")[1]), .arch] | @tsv')
                   fi
 
                   jq -n \
