@@ -110,6 +110,12 @@ sources:
       project_name: "pgEdge AI DBA Workbench"
       project_version: "1.0.0-beta1"
 
+
+    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
+      tag: "v1.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge AI DBA Workbench"
+      project_version: "1.0.0"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "patroni413"
       doc_path: "docs"
