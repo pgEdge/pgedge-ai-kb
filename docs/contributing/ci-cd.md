@@ -90,7 +90,8 @@ default) and:
    opens or updates a pull request when actionable drift exists.
 
 The workflow never comments on developer pull requests. Consumer
-entries that are absent from the SSOT are handled by kind:
+entries that the SSOT does not expose to kb-builder — whether removed
+outright or held back by policy — are handled by kind:
 
 - Versioned entries (those carrying a `project_version`) that no
   longer exist in the SSOT are auto-removed — for example, a patch
