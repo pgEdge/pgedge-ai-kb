@@ -266,7 +266,10 @@ jobs:
             - name: Route suffix → repo_type
               id: route
               env:
-                  SUFFIX: ${{ steps.parse.outputs.suffix }}
+                  # Both passed via env: so a hostile tag value can't be
+                  # template-substituted into the shell body.
+                  SUFFIX:        ${{ steps.parse.outputs.suffix }}
+                  EFFECTIVE_TAG: ${{ steps.parse.outputs.effective_tag }}
               run: |
                   set -euo pipefail
                   # Routing is policy and stays per-repo — different
@@ -277,7 +280,7 @@ jobs:
                       test*|dev*)            repo_type=daily   ;;
                       rc*|beta*|alpha*|"")   repo_type=staging ;;
                       *)
-                          echo "::error::Unsupported suffix '$SUFFIX' (effective tag: ${{ steps.parse.outputs.effective_tag }})"
+                          echo "::error::Unsupported suffix '$SUFFIX' (effective tag: $EFFECTIVE_TAG)"
                           exit 1
                           ;;
                   esac
