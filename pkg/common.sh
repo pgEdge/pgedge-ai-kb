@@ -17,7 +17,13 @@ export PGEDGE_KB_VERSION="${COMPONENT_VERSION:-1.0.0}"
 export PGEDGE_KB_BUILDNUM="${COMPONENT_BUILDNUM:-1}"
 export REPO_TYPE="${REPO_TYPE:-daily}"
 
-# Convert underscore to tilde for Debian/Ubuntu packaging
+# DEB only: move a pre-release pretag (e.g. BUILDNUM='beta3_1') into the
+# upstream VERSION with a leading '~' (1.0.0~beta3, BUILDNUM=1) so '~'
+# sorts pre-releases BELOW stable in dpkg/reprepro.
 if command -v apt-get &>/dev/null; then
-    PGEDGE_KB_BUILDNUM="$(printf '%s' "${PGEDGE_KB_BUILDNUM}" | tr '_' '~')"
+    if [[ "$PGEDGE_KB_BUILDNUM" == *_* ]]; then
+        PGEDGE_KB_PRETAG="${PGEDGE_KB_BUILDNUM%%_*}"
+        export PGEDGE_KB_VERSION="${PGEDGE_KB_VERSION}~${PGEDGE_KB_PRETAG}"
+        PGEDGE_KB_BUILDNUM="${PGEDGE_KB_BUILDNUM##*_}"
+    fi
 fi
