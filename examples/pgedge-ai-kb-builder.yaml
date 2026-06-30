@@ -81,6 +81,12 @@ sources:
       project_version: "4.1.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "supautils322"
+      doc_path: "docs"
+      project_name: "supautils"
+      project_version: "3.2.2"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "vchordbm25030"
       doc_path: "docs"
       project_name: "VectorChord-bm25"
@@ -144,6 +150,12 @@ sources:
       project_version: "1.0.0"
 
     - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.10"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.10"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
       tag: "v5.0.9"
       doc_path: "docs"
       project_name: "Spock"
@@ -202,6 +214,12 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge Control Plane"
       project_version: "0.6.1"
+
+    - git_url: "https://github.com/pgEdge/snowflake.git"
+      tag: "v2.5.0"
+      doc_path: "docs"
+      project_name: "pgEdge Snowflake"
+      project_version: "2.5.0"
 
     - git_url: "https://github.com/pgEdge/snowflake.git"
       tag: "v2.4"
