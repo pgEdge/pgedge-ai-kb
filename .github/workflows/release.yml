@@ -202,7 +202,8 @@ jobs:
             - name: Download kb.db
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
-                  name: kb-db-validated
+                  pattern: kb-db-*
+                  merge-multiple: true
                   path: dist/
 
             - name: Generate checksums
@@ -290,8 +291,11 @@ jobs:
     # -------------------------------------------------------------------------
     # kb.db sourcing — either generate inline or discover latest published.
     # Exactly one of generate-kb-db / discover-kb-db runs per workflow run;
-    # both produce the same artifact name `kb-db-validated` containing kb.db
-    # plus a RELEASE_TAG file. validate-kb-db is the downstream gate.
+    # both produce one artifact per provider (kb-db-openai, kb-db-voyage,
+    # kb-db-gemini, kb-db-ollama) plus a kb-db-meta artifact holding the
+    # RELEASE_TAG file. Downstream jobs recombine them with
+    # `pattern: kb-db-*` + `merge-multiple: true`. validate-kb-db is the
+    # downstream gate.
     # -------------------------------------------------------------------------
 
     generate-kb-db:
@@ -469,13 +473,52 @@ jobs:
                   rm -rf "$API_KEYS_DIR"
                   rm -f "$RUNNER_TEMP/gitconfig"
 
-            - name: Upload kb-db-validated artifact
+            # One artifact per provider instead of a single ~2 GB bundle.
+            # A self-hosted runner's upload is slow enough that a single
+            # multi-GB upload outlives the Azure SAS token and fails with
+            # "Server failed to authenticate the request". Each step here
+            # gets a fresh token at its own start, and the largest single
+            # DB is well under that window, so no upload races the clock.
+            # Downstream jobs pull them back with `pattern: kb-db-*` +
+            # `merge-multiple: true`, reproducing the original flat layout.
+            - name: Upload kb.db artifact (OpenAI)
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: kb-db-validated
-                  path: |
-                      bin/kb-*.db
-                      bin/RELEASE_TAG
+                  name: kb-db-openai
+                  path: bin/kb-openai-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb.db artifact (Voyage)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-voyage
+                  path: bin/kb-voyage-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb.db artifact (Gemini)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-gemini
+                  path: bin/kb-gemini-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb.db artifact (Ollama)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-ollama
+                  path: bin/kb-ollama-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb release tag (meta)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-meta
+                  path: bin/RELEASE_TAG
+                  if-no-files-found: error
                   retention-days: 7
 
     discover-kb-db:
@@ -517,13 +560,52 @@ jobs:
                   echo "${KB_TAG}" > bin/RELEASE_TAG
                   ls -lh bin/
 
-            - name: Upload kb-db-validated artifact
+            # One artifact per provider instead of a single ~2 GB bundle.
+            # A self-hosted runner's upload is slow enough that a single
+            # multi-GB upload outlives the Azure SAS token and fails with
+            # "Server failed to authenticate the request". Each step here
+            # gets a fresh token at its own start, and the largest single
+            # DB is well under that window, so no upload races the clock.
+            # Downstream jobs pull them back with `pattern: kb-db-*` +
+            # `merge-multiple: true`, reproducing the original flat layout.
+            - name: Upload kb.db artifact (OpenAI)
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: kb-db-validated
-                  path: |
-                      bin/kb-*.db
-                      bin/RELEASE_TAG
+                  name: kb-db-openai
+                  path: bin/kb-openai-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb.db artifact (Voyage)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-voyage
+                  path: bin/kb-voyage-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb.db artifact (Gemini)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-gemini
+                  path: bin/kb-gemini-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb.db artifact (Ollama)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-ollama
+                  path: bin/kb-ollama-*.db
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Upload kb release tag (meta)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: kb-db-meta
+                  path: bin/RELEASE_TAG
+                  if-no-files-found: error
                   retention-days: 7
 
     validate-kb-db:
@@ -545,10 +627,11 @@ jobs:
             - name: Install sqlite3
               run: sudo apt-get update && sudo apt-get install -y sqlite3
 
-            - name: Download kb-db-validated artifact
+            - name: Download kb.db artifacts
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
-                  name: kb-db-validated
+                  pattern: kb-db-*
+                  merge-multiple: true
                   path: kb.db.cached/
 
             - name: Validate schema, row counts, embedding dimensions
@@ -662,7 +745,8 @@ jobs:
             - name: Download validated kb.db
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
-                  name: kb-db-validated
+                  pattern: kb-db-*
+                  merge-multiple: true
                   path: pkg/kb.db.cached/
 
             - name: Checkout pgEdge action repos
@@ -852,7 +936,8 @@ jobs:
             - name: Download validated kb.db
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
-                  name: kb-db-validated
+                  pattern: kb-db-*
+                  merge-multiple: true
                   path: pkg/kb.db.cached/
 
             - name: Checkout pgEdge action repos
