@@ -282,28 +282,63 @@ jobs:
                   echo "Routed suffix '$SUFFIX' → repo_type=$repo_type"
 
     # -------------------------------------------------------------------------
-    # kb.db sourcing — either generate inline or discover latest published.
-    # Exactly one of generate-kb-db / discover-kb-db runs per workflow run;
-    # both push one OCI artifact per provider DB to GHCR
-    # (ghcr.io/<owner>/pgedge-ai-kb/<db-name>:<version>) and export the list
-    # of DB basenames as the `db-names` output. Downstream jobs pull them
-    # back from GHCR with oras. GHCR replaces the flaky (and 2 GB-capped)
-    # actions/upload-artifact hand-off, and the same artifacts are what
-    # drydock mounts via Image Volume Source. validate-kb-db is the
-    # downstream gate.
+    # kb.db sourcing — either regenerate (per-provider parallel matrix) or
+    # discover the latest published kb-* release. Exactly one path runs per
+    # workflow run. Both push one OCI artifact per provider DB to GHCR
+    # (ghcr.io/<owner>/pgedge-ai-kb/<db-name>:<release-tag>). The set of DB
+    # basenames is defined once in kb-matrix and pulled back with oras. GHCR
+    # replaces the flaky (and 2 GB-capped) actions/upload-artifact hand-off,
+    # and the same artifacts are what drydock mounts via Image Volume Source.
+    # validate-kb-db is the downstream gate.
     # -------------------------------------------------------------------------
 
+    # -------------------------------------------------------------------------
+    # KB provider/model matrix — single source of truth for what gets built.
+    # Each row becomes one PARALLEL generate-kb-db cell and one GHCR artifact
+    # named kb-<provider>-<model>.db. Add a row to build another model (a
+    # provider may have several). Ollama MUST stay on the self-hosted runner
+    # (embedding on GitHub-hosted runners fails); cloud providers run on
+    # ubuntu-latest. `db-names` is the derived list downstream jobs pull.
+    # -------------------------------------------------------------------------
+    kb-matrix:
+        name: KB provider/model matrix
+        runs-on: ubuntu-latest
+        outputs:
+            matrix: ${{ steps.set.outputs.matrix }}
+            db-names: ${{ steps.set.outputs.db-names }}
+        steps:
+            - name: Define matrix
+              id: set
+              run: |
+                  set -euo pipefail
+                  matrix='{"include":[
+                    {"provider":"openai","label":"OpenAI","model":"text-embedding-3-small","runner":"ubuntu-latest"},
+                    {"provider":"voyage","label":"Voyage","model":"voyage-3","runner":"ubuntu-latest"},
+                    {"provider":"gemini","label":"Gemini","model":"gemini-embedding-001","runner":"ubuntu-latest"},
+                    {"provider":"ollama","label":"Ollama","model":"nomic-embed-text","runner":["ollama","self-hosted"]}
+                  ]}'
+                  matrix="$(echo "$matrix" | jq -c .)"
+                  # Derived DB filenames: kb-<provider>-<model>.db — must match
+                  # the builder's output naming for a single-provider run.
+                  names="$(echo "$matrix" | jq -r '.include[] | "kb-\(.provider)-\(.model).db"' | tr '\n' ' ')"
+                  echo "matrix=${matrix}"        >> "$GITHUB_OUTPUT"
+                  echo "db-names=${names% }"     >> "$GITHUB_OUTPUT"
+                  echo "matrix:   ${matrix}"
+                  echo "db-names: ${names% }"
+
     generate-kb-db:
-        name: Generate kb.db (inline)
-        needs: determine-repo-type
+        name: Generate ${{ matrix.provider }}/${{ matrix.model }}
+        needs: [determine-repo-type, kb-matrix]
         # Default behavior is to regenerate. Set workflow_dispatch input
         # `regenerate_kb_db: false` to skip and use the latest published
         # kb-* release instead.
         if: github.event.inputs.regenerate_kb_db != 'false'
-        runs-on: [ollama, self-hosted]
-        outputs:
-            kb-db-release-tag: ${{ steps.tag.outputs.kb-db-release-tag }}
-            db-names: ${{ steps.ghcr.outputs.db-names }}
+        # Per-cell runner: cloud providers on ubuntu-latest; ollama pinned to
+        # the self-hosted runner (see kb-matrix).
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJSON(needs.kb-matrix.outputs.matrix) }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -330,6 +365,7 @@ jobs:
                   GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global url."https://x-access-token:${PGEDGE_BUILDER_TOKEN}@github.com/".insteadOf "https://github.com/"
 
             - name: Start Ollama service
+              if: matrix.provider == 'ollama'
               run: |
                   ollama serve &
                   echo $! > "$RUNNER_TEMP/ollama.pid"
@@ -338,39 +374,37 @@ jobs:
                     sleep 2; elapsed=$((elapsed + 2))
                     if [ "$elapsed" -ge "$timeout" ]; then echo "Ollama did not start within ${timeout}s"; exit 1; fi
                   done
-                  ollama pull nomic-embed-text
-                  echo "Ollama ready with nomic-embed-text"
+                  ollama pull "${{ matrix.model }}"
+                  echo "Ollama ready with ${{ matrix.model }}"
 
             - name: Build kb-builder binary
               run: CGO_ENABLED=0 go build -o pgedge-ai-kb-builder ./cmd/kb-builder
 
             - name: Setup API keys for kb-builder
+              # All cloud keys are staged on every cell (secrets are available
+              # to all runners); the config only reads the enabled provider's.
               env:
                   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
                   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
               run: |
-                  [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
-                  [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
-                  [ -n "$GEMINI_API_KEY" ] || { echo "GEMINI_API_KEY secret is missing"; exit 1; }
                   mkdir -p "$API_KEYS_DIR"
-                  printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
-                  printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
-                  printf '%s' "$GEMINI_API_KEY" > "$API_KEYS_DIR/gemini-key"
+                  printf '%s' "${OPENAI_API_KEY:-}" > "$API_KEYS_DIR/openai-key"
+                  printf '%s' "${VOYAGE_API_KEY:-}" > "$API_KEYS_DIR/voyage-key"
+                  printf '%s' "${GEMINI_API_KEY:-}" > "$API_KEYS_DIR/gemini-key"
                   chmod 600 "$API_KEYS_DIR"/*
 
-            - name: Configure kb-builder for cloud providers
+            - name: Configure kb-builder (this provider/model only)
               env:
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
+                  KEEP: ${{ matrix.provider }}
+                  MODEL: ${{ matrix.model }}
               run: |
                   set -euo pipefail
                   cfg=examples/pgedge-ai-kb-builder-build.yaml
                   cp examples/pgedge-ai-kb-builder.yaml "${cfg}"
-                  # Single sed invocation with multiple -e expressions, then
-                  # write-to-temp + mv. Avoids `sed -i ''` (BSD-only) and
-                  # `sed -i` (GNU-only); this form works on both since the
-                  # self-hosted runner OS isn't pinned here.
+                  # Portable form (no `sed -i`, which differs BSD vs GNU).
                   sed \
                       -e 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' \
                       -e "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" \
@@ -379,11 +413,27 @@ jobs:
                       -e 's|git@github.com:|https://github.com/|g' \
                       "${cfg}" > "${cfg}.new"
                   mv "${cfg}.new" "${cfg}"
-                  grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "database_path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" "${cfg}" || { echo "OpenAI key path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" "${cfg}" || { echo "Voyage key path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/gemini-key\"" "${cfg}" || { echo "Gemini key path replacement failed"; exit 1; }
-                  grep -q 'https://github.com/' "${cfg}" || { echo "SSH URL replacement failed"; exit 1; }
+                  # Enable ONLY this cell's provider and pin its model. `p` is
+                  # the current 4-space section header; enabled/model edits are
+                  # guarded to the four provider blocks.
+                  awk -v keep="${KEEP}" -v model="${MODEL}" '
+                    /^    [A-Za-z0-9_]+:[[:space:]]*$/ { p=$1; sub(/:$/,"",p) }
+                    /^        enabled:/ && (p=="openai"||p=="voyage"||p=="gemini"||p=="ollama") {
+                      if (p!=keep) sub(/true/,"false"); print; next
+                    }
+                    /^        model:/ && p==keep {
+                      sub(/model:.*/, "model: \"" model "\""); print; next
+                    }
+                    { print }
+                  ' "${cfg}" > "${cfg}.new"
+                  mv "${cfg}.new" "${cfg}"
+                  grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "::error::db path repl failed"; exit 1; }
+                  # Exactly the kept provider must be enabled.
+                  enabled="$(awk '
+                    /^    [A-Za-z0-9_]+:[[:space:]]*$/ { p=$1; sub(/:$/,"",p) }
+                    /^        enabled: true/ && (p=="openai"||p=="voyage"||p=="gemini"||p=="ollama") { print p }
+                  ' "${cfg}" | tr "\n" " " | sed "s/ $//")"
+                  [ "${enabled}" = "${KEEP}" ] || { echo "::error::enabled='${enabled}' expected '${KEEP}'"; cat "${cfg}"; exit 1; }
 
             - name: Generate kb.db (capturing log for coverage check)
               env:
@@ -391,12 +441,12 @@ jobs:
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
               run: |
                   mkdir -p bin
-                  # Tee preserves the log for the per-provider coverage check
-                  # while still streaming to the workflow's live log.
+                  # Tee preserves the log for the coverage check while still
+                  # streaming to the workflow's live log.
                   ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50 \
                     2>&1 | tee bin/kb-builder.log
 
-            - name: Verify databases were created
+            - name: Verify database was created
               run: |
                   set -euo pipefail
                   shopt -s nullglob
@@ -417,45 +467,51 @@ jobs:
                   done
                   [ "$fail" -eq 0 ] || exit 1
 
-            - name: Verify per-provider coverage (OpenAI, Voyage, Gemini, Ollama)
-              # Each provider must log a "<Provider>: Processed N/M chunks"
-              # line where the LAST such line shows N == M (every batch
-              # finished). Strict mode: all four providers must be present.
-              # If a provider is intentionally disabled in the config, this
-              # check will fail — that's intentional per release policy.
+            - name: Verify provider coverage (${{ matrix.label }})
+              # The last "<Provider>: Processed N/M chunks" line must show N==M.
+              env:
+                  PROVIDER: ${{ matrix.label }}
               run: |
                   set -euo pipefail
                   log=bin/kb-builder.log
                   [ -f "$log" ] || { echo "::error::kb-builder.log missing"; exit 1; }
+                  last=$(grep -E "^[[:space:]]*${PROVIDER}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
+                  [ -n "$last" ] || { echo "::error::${PROVIDER}: no 'Processed X/Y chunks' lines in log"; exit 1; }
+                  done=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\1|')
+                  total=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\2|')
+                  [ "$done" = "$total" ] || { echo "::error::${PROVIDER} embedded only ${done} of ${total} chunks"; exit 1; }
+                  echo "${PROVIDER}: ${done}/${total} ✓"
 
-                  fail=0
-                  for provider in OpenAI Voyage Gemini Ollama; do
-                      last=$(grep -E "^[[:space:]]*${provider}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
-                      if [ -z "$last" ]; then
-                          echo "::error::${provider}: no 'Processed X/Y chunks' lines in log (provider missing or disabled)"
-                          fail=1
-                          continue
-                      fi
-                      done=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\1|')
-                      total=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\2|')
-                      if [ "$done" = "$total" ]; then
-                          echo "${provider}: ${done}/${total} ✓"
-                      else
-                          echo "::error::${provider} embedded only ${done} of ${total} chunks"
-                          fail=1
-                      fi
-                  done
-                  [ "$fail" = "0" ] || exit 1
+            # Push this cell's DB to GHCR as an OCI artifact (replaces the
+            # flaky, 2 GB-capped actions/upload-artifact). Cloud cells push
+            # from ubuntu-latest (reliable); the ollama cell pushes its small
+            # DB from the self-hosted runner. Tag = the release tag; :latest
+            # only on a final release. The same artifacts are what drydock
+            # mounts via Image Volume Source.
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
 
-            - name: Compute synthetic release tag
-              id: tag
+            - name: Push kb.db artifact to GHCR
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
               run: |
-                  # Synthetic tag for an inline-generated kb.db. Embeds the
-                  # workflow run ID so packaging traces back unambiguously.
-                  tag="kb-$(date -u +%Y-%m-%d)-r${GITHUB_RUN_ID}"
-                  echo "kb-db-release-tag=${tag}" >> "$GITHUB_OUTPUT"
-                  echo "${tag}" > bin/RELEASE_TAG
-                  echo "Generated: ${tag}"
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  extra=""
+                  case "${TAG}" in
+                      *-*) : ;;
+                      *)   extra=",latest" ;;
+                  esac
+                  cd bin
+                  for db in kb-*.db; do
+                      echo "Pushing ${db} -> ${ns}/${db}:${TAG}${extra}"
+                      oras push "${ns}/${db}:${TAG}${extra}" \
+                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
+                          "${db}:application/vnd.sqlite3"
+                  done
 
             - name: Cleanup (ollama + API keys)
               if: always()
@@ -468,44 +524,6 @@ jobs:
                   fi
                   rm -rf "$API_KEYS_DIR"
                   rm -f "$RUNNER_TEMP/gitconfig"
-
-            # Push each per-provider DB to GHCR as an OCI artifact instead of
-            # using actions/upload-artifact. On this self-hosted runner the
-            # artifact (Azure blob) upload path is slow/flaky and has failed
-            # with SAS-token expiry, EPIPE and ECONNRESET on multi-GB
-            # transfers; oras pushes to a different endpoint (ghcr.io /
-            # pkg-containers) with chunked, resumable, retrying uploads. The
-            # same artifacts are what drydock mounts. `db-names` (the list of
-            # DB basenames) is exported so downstream jobs know what to pull.
-            - name: Install oras
-              uses: ./.github/actions/setup-oras
-
-            - name: Push kb.db artifacts to GHCR
-              id: ghcr
-              env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
-              run: |
-                  set -euo pipefail
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  names=""
-                  cd bin
-                  # Tag with the run-unique KB tag (deterministic transport —
-                  # a reused version tag would collide across re-tagged runs)
-                  # plus the stable version + latest tags drydock pins
-                  # against. One push, multiple tags.
-                  kb_tag="$(cat RELEASE_TAG)"
-                  for db in kb-*.db; do
-                      echo "Pushing ${db} -> ${ns}/${db}:${kb_tag} (+${VERSION},latest)"
-                      oras push "${ns}/${db}:${kb_tag},${VERSION},latest" \
-                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
-                          "${db}:application/vnd.sqlite3"
-                      names="${names:+${names} }${db}"
-                  done
-                  echo "db-names=${names}" >> "$GITHUB_OUTPUT"
-                  echo "Pushed: ${names}"
 
     discover-kb-db:
         name: Discover latest published kb.db
@@ -561,22 +579,26 @@ jobs:
               id: ghcr
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
               run: |
                   set -euo pipefail
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
                   ns="ghcr.io/${owner}/pgedge-ai-kb"
                   echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  # Tag each artifact with the release tag (e.g. v1.0.1 or
+                  # v1.0.0-test1). Move :latest ONLY on a final release; a
+                  # pre-release (…-test1/-beta1/-rc1/-alpha1, identified by the
+                  # '-' suffix) must never become :latest.
+                  extra=""
+                  case "${TAG}" in
+                      *-*) : ;;
+                      *)   extra=",latest" ;;
+                  esac
                   names=""
                   cd bin
-                  # Tag with the run-unique KB tag (deterministic transport —
-                  # a reused version tag would collide across re-tagged runs)
-                  # plus the stable version + latest tags drydock pins
-                  # against. One push, multiple tags.
-                  kb_tag="$(cat RELEASE_TAG)"
                   for db in kb-*.db; do
-                      echo "Pushing ${db} -> ${ns}/${db}:${kb_tag} (+${VERSION},latest)"
-                      oras push "${ns}/${db}:${kb_tag},${VERSION},latest" \
+                      echo "Pushing ${db} -> ${ns}/${db}:${TAG}${extra}"
+                      oras push "${ns}/${db}:${TAG}${extra}" \
                           --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
                           "${db}:application/vnd.sqlite3"
                       names="${names:+${names} }${db}"
@@ -589,17 +611,17 @@ jobs:
         runs-on: ubuntu-latest
         # Gate downstream packaging. Runs after whichever upstream produced
         # the artifact; downstream `needs: validate-kb-db` ensures sequencing.
-        needs: [determine-repo-type, generate-kb-db, discover-kb-db]
+        needs: [determine-repo-type, kb-matrix, generate-kb-db, discover-kb-db]
         if: |
             always() && (
               needs.generate-kb-db.result == 'success' ||
               needs.discover-kb-db.result == 'success'
             )
         outputs:
-            # Proxy the upstream's tag + DB list so downstream consumers have
-            # one place to look (whether the kb.db was generated or discovered).
-            kb-db-release-tag: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
-            db-names: ${{ needs.generate-kb-db.outputs.db-names || needs.discover-kb-db.outputs.db-names }}
+            # db-names come from the single-source kb-matrix job; the tag used
+            # for both the GHCR ref and package provenance is the release tag.
+            kb-db-release-tag: ${{ needs.determine-repo-type.outputs.effective-tag }}
+            db-names: ${{ needs.kb-matrix.outputs.db-names }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -613,9 +635,8 @@ jobs:
             - name: Pull kb.db artifacts from GHCR
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
-                  DB_NAMES: ${{ needs.generate-kb-db.outputs.db-names || needs.discover-kb-db.outputs.db-names }}
-                  KB_TAG: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  DB_NAMES: ${{ needs.kb-matrix.outputs.db-names }}
               run: |
                   set -euo pipefail
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
@@ -623,10 +644,11 @@ jobs:
                   echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
                   mkdir -p kb.db.cached
                   for name in ${DB_NAMES}; do
-                      echo "Pulling ${ns}/${name}:${KB_TAG}"
-                      oras pull "${ns}/${name}:${KB_TAG}" -o kb.db.cached
+                      echo "Pulling ${ns}/${name}:${TAG}"
+                      oras pull "${ns}/${name}:${TAG}" -o kb.db.cached
                   done
-                  echo "${KB_TAG}" > kb.db.cached/RELEASE_TAG
+                  # RELEASE_TAG carries provenance for the package changelog.
+                  echo "${TAG}" > kb.db.cached/RELEASE_TAG
                   ls -lh kb.db.cached/
 
             - name: Validate schema, row counts, embedding dimensions
@@ -744,6 +766,7 @@ jobs:
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
               run: |
                   set -euo pipefail
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
@@ -751,9 +774,11 @@ jobs:
                   echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
                   mkdir -p pkg/kb.db.cached
                   for name in ${DB_NAMES}; do
-                      echo "Pulling ${ns}/${name}:${KB_TAG}"
-                      oras pull "${ns}/${name}:${KB_TAG}" -o pkg/kb.db.cached
+                      echo "Pulling ${ns}/${name}:${TAG}"
+                      oras pull "${ns}/${name}:${TAG}" -o pkg/kb.db.cached
                   done
+                  # RELEASE_TAG carries KB build provenance for the package
+                  # changelog; the GHCR ref uses the release tag above.
                   echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
                   ls -lh pkg/kb.db.cached/
 
@@ -948,6 +973,7 @@ jobs:
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
               run: |
                   set -euo pipefail
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
@@ -955,9 +981,11 @@ jobs:
                   echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
                   mkdir -p pkg/kb.db.cached
                   for name in ${DB_NAMES}; do
-                      echo "Pulling ${ns}/${name}:${KB_TAG}"
-                      oras pull "${ns}/${name}:${KB_TAG}" -o pkg/kb.db.cached
+                      echo "Pulling ${ns}/${name}:${TAG}"
+                      oras pull "${ns}/${name}:${TAG}" -o pkg/kb.db.cached
                   done
+                  # RELEASE_TAG carries KB build provenance for the package
+                  # changelog; the GHCR ref uses the release tag above.
                   echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
                   ls -lh pkg/kb.db.cached/
 
