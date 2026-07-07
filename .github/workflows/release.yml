@@ -348,6 +348,50 @@ jobs:
             - name: Clean build artifacts from previous runs
               run: rm -rf bin/ pgedge-ai-kb-builder examples/pgedge-ai-kb-builder-build.yaml
 
+            # (diag) TEMP self-hosted egress diagnostics — ollama cell only,
+            # runs early (before the ~45-min build) so it can be read and the
+            # run cancelled quickly. UniFi shows a clean LAN, so this checks
+            # the on-host suspects: TLS interception, proxy/VPN, per-endpoint
+            # timing, and actual GHCR upload throughput. Remove once the
+            # runner network is fixed.
+            - name: (diag) Install oras
+              if: matrix.provider == 'ollama'
+              uses: ./.github/actions/setup-oras
+
+            - name: (diag) Self-hosted egress probe
+              if: matrix.provider == 'ollama'
+              continue-on-error: true
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  PROBE_MB: "200"
+              run: |
+                  set +e
+                  echo "== proxy env vars =="; env | grep -iE 'proxy' || echo "(none set)"
+                  echo "== interfaces / MTU (VPN => utun/ipsec/tun/wg) =="
+                  ifconfig 2>/dev/null | grep -E '^[a-z0-9]+:|mtu|inet '
+                  echo "== interceptor/VPN/security agents =="
+                  ps axo comm= 2>/dev/null | grep -iE 'zscaler|netskope|umbrella|littlesnitch|globalprotect|cisco|forcepoint|crowdstrike|santa|openvpn|wireguard|tailscale' | sort -u || echo "(none matched)"
+                  for h in ghcr.io pkg-containers.githubusercontent.com github.com; do
+                    echo "===================== ${h} ====================="
+                    echo "-- TLS issuer (expect a PUBLIC CA; a corp/proxy CA => on-host TLS interception) --"
+                    echo | openssl s_client -connect "${h}:443" -servername "$h" 2>/dev/null | openssl x509 -noout -issuer
+                    echo "-- curl timing --"
+                    curl -sS -o /dev/null -w "   dns=%{time_namelookup}s tls=%{time_appconnect}s ttfb=%{time_starttransfer}s total=%{time_total}s http=%{http_code} httpver=%{http_version}\n" "https://${h}/" 2>&1
+                  done
+                  echo "===================== GHCR upload probe (${PROBE_MB} MB) ====================="
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ref="ghcr.io/${owner}/pgedge-ai-kb/egress-probe:r${GITHUB_RUN_ID}"
+                  head -c $(( PROBE_MB * 1024 * 1024 )) /dev/urandom > "$RUNNER_TEMP/egress-probe.bin"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  echo "Pushing ${PROBE_MB} MB -> ${ref}"
+                  start=$(date +%s)
+                  oras push "$ref" --artifact-type application/vnd.pgedge.egress.probe "$RUNNER_TEMP/egress-probe.bin:application/octet-stream"
+                  rc=$?; end=$(date +%s); dur=$((end - start))
+                  echo "PROBE: rc=${rc} dur=${dur}s throughput=~$(awk "BEGIN{printf \"%.2f\", ${PROBE_MB}/(${dur}>0?${dur}:1)}") MB/s"
+                  echo "-- download compare (fast download + slow upload => egress-specific) --"
+                  curl -sS -o /dev/null -w "   download: %{speed_download} B/s\n" "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_darwin_arm64.tar.gz" 2>&1
+                  rm -f "$RUNNER_TEMP/egress-probe.bin"
+
             - name: Set up Go
               uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
               with:
