@@ -318,6 +318,18 @@ sources:
       project_version: "1.28"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "barmancloud013"
+      doc_path: "docs"
+      project_name: "Barman Cloud Plugin"
+      project_version: "0.13.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "barmancloud012"
+      doc_path: "docs"
+      project_name: "Barman Cloud Plugin"
+      project_version: "0.12.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgvector081"
       doc_path: "docs"
       project_name: "pgvector"
