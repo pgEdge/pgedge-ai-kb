@@ -199,21 +199,15 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist/
 
-            - name: Download kb.db
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: dist/
-
+            # The kb DBs are no longer attached to the GitHub release; they
+            # are published to GHCR as OCI artifacts (see generate-kb-db /
+            # discover-kb-db). GitHub release assets are hard-capped at 2 GB,
+            # which the multi-GB kb.db exceeded and failed this step. The
+            # release now carries only the binary tarballs.
             - name: Generate checksums
               run: |
                   cd dist
-                  # RELEASE_TAG is an internal coordination file (consumed
-                  # by build-rpm.sh / build-deb.sh inside the build container)
-                  # and isn't a user-facing artifact, so it's not checksummed
-                  # and isn't listed in the release files below.
-                  sha256sum *.tar.gz *.zip kb-*.db > checksums.txt
+                  sha256sum *.tar.gz *.zip > checksums.txt
                   cat checksums.txt
 
             - name: Create GitHub Release
@@ -222,7 +216,6 @@ jobs:
                   files: |
                       dist/*.tar.gz
                       dist/*.zip
-                      dist/kb-*.db
                       dist/checksums.txt
                   generate_release_notes: true
                   draft: false
@@ -291,10 +284,12 @@ jobs:
     # -------------------------------------------------------------------------
     # kb.db sourcing — either generate inline or discover latest published.
     # Exactly one of generate-kb-db / discover-kb-db runs per workflow run;
-    # both produce one artifact per provider (kb-db-openai, kb-db-voyage,
-    # kb-db-gemini, kb-db-ollama) plus a kb-db-meta artifact holding the
-    # RELEASE_TAG file. Downstream jobs recombine them with
-    # `pattern: kb-db-*` + `merge-multiple: true`. validate-kb-db is the
+    # both push one OCI artifact per provider DB to GHCR
+    # (ghcr.io/<owner>/pgedge-ai-kb/<db-name>:<version>) and export the list
+    # of DB basenames as the `db-names` output. Downstream jobs pull them
+    # back from GHCR with oras. GHCR replaces the flaky (and 2 GB-capped)
+    # actions/upload-artifact hand-off, and the same artifacts are what
+    # drydock mounts via Image Volume Source. validate-kb-db is the
     # downstream gate.
     # -------------------------------------------------------------------------
 
@@ -308,6 +303,7 @@ jobs:
         runs-on: [ollama, self-hosted]
         outputs:
             kb-db-release-tag: ${{ steps.tag.outputs.kb-db-release-tag }}
+            db-names: ${{ steps.ghcr.outputs.db-names }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -473,53 +469,43 @@ jobs:
                   rm -rf "$API_KEYS_DIR"
                   rm -f "$RUNNER_TEMP/gitconfig"
 
-            # One artifact per provider instead of a single ~2 GB bundle.
-            # A self-hosted runner's upload is slow enough that a single
-            # multi-GB upload outlives the Azure SAS token and fails with
-            # "Server failed to authenticate the request". Each step here
-            # gets a fresh token at its own start, and the largest single
-            # DB is well under that window, so no upload races the clock.
-            # Downstream jobs pull them back with `pattern: kb-db-*` +
-            # `merge-multiple: true`, reproducing the original flat layout.
-            - name: Upload kb.db artifact (OpenAI)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-openai
-                  path: bin/kb-openai-*.db
-                  if-no-files-found: error
-                  retention-days: 7
+            # Push each per-provider DB to GHCR as an OCI artifact instead of
+            # using actions/upload-artifact. On this self-hosted runner the
+            # artifact (Azure blob) upload path is slow/flaky and has failed
+            # with SAS-token expiry, EPIPE and ECONNRESET on multi-GB
+            # transfers; oras pushes to a different endpoint (ghcr.io /
+            # pkg-containers) with chunked, resumable, retrying uploads. The
+            # same artifacts are what drydock mounts. `db-names` (the list of
+            # DB basenames) is exported so downstream jobs know what to pull.
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
 
-            - name: Upload kb.db artifact (Voyage)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-voyage
-                  path: bin/kb-voyage-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Gemini)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-gemini
-                  path: bin/kb-gemini-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Ollama)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-ollama
-                  path: bin/kb-ollama-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb release tag (meta)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-meta
-                  path: bin/RELEASE_TAG
-                  if-no-files-found: error
-                  retention-days: 7
+            - name: Push kb.db artifacts to GHCR
+              id: ghcr
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  names=""
+                  cd bin
+                  # Tag with the run-unique KB tag (deterministic transport —
+                  # a reused version tag would collide across re-tagged runs)
+                  # plus the stable version + latest tags drydock pins
+                  # against. One push, multiple tags.
+                  kb_tag="$(cat RELEASE_TAG)"
+                  for db in kb-*.db; do
+                      echo "Pushing ${db} -> ${ns}/${db}:${kb_tag} (+${VERSION},latest)"
+                      oras push "${ns}/${db}:${kb_tag},${VERSION},latest" \
+                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
+                          "${db}:application/vnd.sqlite3"
+                      names="${names:+${names} }${db}"
+                  done
+                  echo "db-names=${names}" >> "$GITHUB_OUTPUT"
+                  echo "Pushed: ${names}"
 
     discover-kb-db:
         name: Discover latest published kb.db
@@ -531,9 +517,15 @@ jobs:
         runs-on: ubuntu-latest
         outputs:
             kb-db-release-tag: ${{ steps.find.outputs.kb-db-release-tag }}
+            db-names: ${{ steps.ghcr.outputs.db-names }}
         env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
+            # Checkout first so the ./.github/actions/setup-oras composite is
+            # available; a later checkout would clean the downloaded bin/ dir.
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
             - name: Find latest kb-* release
               id: find
               run: |
@@ -560,53 +552,37 @@ jobs:
                   echo "${KB_TAG}" > bin/RELEASE_TAG
                   ls -lh bin/
 
-            # One artifact per provider instead of a single ~2 GB bundle.
-            # A self-hosted runner's upload is slow enough that a single
-            # multi-GB upload outlives the Azure SAS token and fails with
-            # "Server failed to authenticate the request". Each step here
-            # gets a fresh token at its own start, and the largest single
-            # DB is well under that window, so no upload races the clock.
-            # Downstream jobs pull them back with `pattern: kb-db-*` +
-            # `merge-multiple: true`, reproducing the original flat layout.
-            - name: Upload kb.db artifact (OpenAI)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-openai
-                  path: bin/kb-openai-*.db
-                  if-no-files-found: error
-                  retention-days: 7
+            # Push each per-provider DB to GHCR (see generate-kb-db for the
+            # rationale on why GHCR replaces actions/upload-artifact here).
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
 
-            - name: Upload kb.db artifact (Voyage)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-voyage
-                  path: bin/kb-voyage-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Gemini)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-gemini
-                  path: bin/kb-gemini-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Ollama)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-ollama
-                  path: bin/kb-ollama-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb release tag (meta)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-meta
-                  path: bin/RELEASE_TAG
-                  if-no-files-found: error
-                  retention-days: 7
+            - name: Push kb.db artifacts to GHCR
+              id: ghcr
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  names=""
+                  cd bin
+                  # Tag with the run-unique KB tag (deterministic transport —
+                  # a reused version tag would collide across re-tagged runs)
+                  # plus the stable version + latest tags drydock pins
+                  # against. One push, multiple tags.
+                  kb_tag="$(cat RELEASE_TAG)"
+                  for db in kb-*.db; do
+                      echo "Pushing ${db} -> ${ns}/${db}:${kb_tag} (+${VERSION},latest)"
+                      oras push "${ns}/${db}:${kb_tag},${VERSION},latest" \
+                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
+                          "${db}:application/vnd.sqlite3"
+                      names="${names:+${names} }${db}"
+                  done
+                  echo "db-names=${names}" >> "$GITHUB_OUTPUT"
+                  echo "Pushed: ${names}"
 
     validate-kb-db:
         name: Validate kb.db
@@ -620,19 +596,38 @@ jobs:
               needs.discover-kb-db.result == 'success'
             )
         outputs:
-            # Proxy the upstream's tag so downstream consumers have one
-            # place to look (whether the kb.db was generated or discovered).
+            # Proxy the upstream's tag + DB list so downstream consumers have
+            # one place to look (whether the kb.db was generated or discovered).
             kb-db-release-tag: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
+            db-names: ${{ needs.generate-kb-db.outputs.db-names || needs.discover-kb-db.outputs.db-names }}
         steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
             - name: Install sqlite3
               run: sudo apt-get update && sudo apt-get install -y sqlite3
 
-            - name: Download kb.db artifacts
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: kb.db.cached/
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
+
+            - name: Pull kb.db artifacts from GHCR
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  VERSION: ${{ needs.determine-repo-type.outputs.component-version }}
+                  DB_NAMES: ${{ needs.generate-kb-db.outputs.db-names || needs.discover-kb-db.outputs.db-names }}
+                  KB_TAG: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  mkdir -p kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      echo "Pulling ${ns}/${name}:${KB_TAG}"
+                      oras pull "${ns}/${name}:${KB_TAG}" -o kb.db.cached
+                  done
+                  echo "${KB_TAG}" > kb.db.cached/RELEASE_TAG
+                  ls -lh kb.db.cached/
 
             - name: Validate schema, row counts, embedding dimensions
               run: |
@@ -742,12 +737,25 @@ jobs:
                   os_version="${IMAGE##*:}"
                   echo "os_version=${os_version}" >> "$GITHUB_OUTPUT"
 
-            - name: Download validated kb.db
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: pkg/kb.db.cached/
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
+
+            - name: Pull validated kb.db from GHCR
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  mkdir -p pkg/kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      echo "Pulling ${ns}/${name}:${KB_TAG}"
+                      oras pull "${ns}/${name}:${KB_TAG}" -o pkg/kb.db.cached
+                  done
+                  echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
+                  ls -lh pkg/kb.db.cached/
 
             - name: Checkout pgEdge action repos
               env:
@@ -933,12 +941,25 @@ jobs:
                   distro="${IMAGE##*:}"
                   echo "distro=${distro}" >> "$GITHUB_OUTPUT"
 
-            - name: Download validated kb.db
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: pkg/kb.db.cached/
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
+
+            - name: Pull validated kb.db from GHCR
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  mkdir -p pkg/kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      echo "Pulling ${ns}/${name}:${KB_TAG}"
+                      oras pull "${ns}/${name}:${KB_TAG}" -o pkg/kb.db.cached
+                  done
+                  echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
+                  ls -lh pkg/kb.db.cached/
 
             - name: Checkout pgEdge action repos
               env:
