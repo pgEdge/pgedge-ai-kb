@@ -533,8 +533,13 @@ jobs:
               run: |
                   set -euo pipefail
                   # Use the v2 binary installed for the ollama cell; on cloud
-                  # cells that dir doesn't exist, fall back to the preinstalled aws.
-                  AWS="$(find "$RUNNER_TEMP/awscli-home" -name aws -type f -perm -u+x 2>/dev/null | head -1)"; [ -n "$AWS" ] || AWS=aws
+                  # cells that dir doesn't exist, fall back to the preinstalled
+                  # aws. Guarded so a missing dir can't trip set -e/pipefail.
+                  AWS=aws
+                  if [ -d "$RUNNER_TEMP/awscli-home" ]; then
+                      v2="$(find "$RUNNER_TEMP/awscli-home" -name aws -type f -perm -u+x 2>/dev/null | head -1 || true)"
+                      if [ -n "$v2" ]; then AWS="$v2"; fi
+                  fi
                   "$AWS" --version
                   base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}/${PROVIDER}/${KB_TS}"
                   for db in bin/kb-*.db; do
