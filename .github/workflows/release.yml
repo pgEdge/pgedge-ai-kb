@@ -199,9 +199,9 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist/
 
-            # The kb DBs are no longer attached to the GitHub release; they
-            # are published to GHCR as OCI artifacts (see generate-kb-db /
-            # discover-kb-db). GitHub release assets are hard-capped at 2 GB,
+            # The kb DBs are no longer attached to the GitHub release; they are
+            # transported via the S3 backup bucket and published to GHCR from
+            # validate-kb-db. GitHub release assets are hard-capped at 2 GB,
             # which the multi-GB kb.db exceeded and failed this step. The
             # release now carries only the binary tarballs.
             - name: Generate checksums
@@ -284,17 +284,18 @@ jobs:
     # -------------------------------------------------------------------------
     # kb.db sourcing — either regenerate (per-provider parallel matrix) or
     # discover the latest published kb-* release. Exactly one path runs per
-    # workflow run. Both push one OCI artifact per provider DB to GHCR
-    # (ghcr.io/<owner>/pgedge-ai-kb/<db-name>:<release-tag>). The set of DB
-    # basenames is defined once in kb-matrix and pulled back with oras. GHCR
-    # replaces the flaky (and 2 GB-capped) actions/upload-artifact hand-off,
-    # and the same artifacts are what drydock mounts via Image Volume Source.
-    # validate-kb-db is the downstream gate.
+    # workflow run. Both upload one DB per provider to the S3 backup bucket at
+    #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
+    # (this replaces the flaky, 2 GB-capped actions/upload-artifact hand-off).
+    # validate-kb-db then pulls them, gates packaging, and pushes them to GHCR
+    # once from a reliable GH-hosted runner. The set of DB basenames + the
+    # shared kb-timestamp are defined once in kb-matrix and read back by the
+    # packaging jobs.
     # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
     # KB provider/model matrix — single source of truth for what gets built.
-    # Each row becomes one PARALLEL generate-kb-db cell and one GHCR artifact
+    # Each row becomes one PARALLEL generate-kb-db cell and one S3 object
     # named kb-<provider>-<model>.db. Add a row to build another model (a
     # provider may have several). Ollama MUST stay on the self-hosted runner
     # (embedding on GitHub-hosted runners fails); cloud providers run on
@@ -489,11 +490,11 @@ jobs:
                   [ "$done" = "$total" ] || { echo "::error::${PROVIDER} embedded only ${done} of ${total} chunks"; exit 1; }
                   echo "${PROVIDER}: ${done}/${total} ✓"
 
-            # GHCR push DISABLED for now — the self-hosted (ollama) runner can't
-            # complete oras's monolithic upload (egress diag: 0.27 MB/s -> 400).
-            # Transport via the S3 backup bucket instead (S3 multipart tolerates
-            # the slow uplink). Re-enable GHCR for drydock once the runner
-            # network is fixed. S3 layout:
+            # Each cell uploads its DB to the S3 backup bucket — S3 multipart
+            # tolerates the self-hosted runner's slow uplink, unlike oras's
+            # monolithic PUT (which failed at ~0.27 MB/s -> 400). GHCR is NOT
+            # pushed from here: validate-kb-db pushes to GHCR once, from a
+            # reliable GH-hosted runner. S3 layout:
             #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
             # AWS CLI is preinstalled on the cloud (ubuntu) cells; only the
             # self-hosted ollama runner needs it — and its Homebrew Python is
@@ -515,7 +516,7 @@ jobs:
                     "<key>attributeSetting</key><string>${root}</string>" \
                     '<key>choiceIdentifier</key><string>default</string>' \
                     '</dict></array></plist>' > "$RUNNER_TEMP/choices.xml"
-                  curl -sS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg"
+                  curl -fsS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg"
                   installer -pkg "$RUNNER_TEMP/awscliv2.pkg" -target CurrentUserHomeDirectory -applyChoiceChangesXML "$RUNNER_TEMP/choices.xml" >/dev/null
                   bin="$(dirname "$(find "$root" -name aws -type f -perm -u+x | head -1)")"
                   echo "$bin" >> "$GITHUB_PATH"
@@ -547,16 +548,6 @@ jobs:
                       "$AWS" s3 cp "$db" "${base}/$(basename "$db")" --only-show-errors
                   done
                   echo "Uploaded to ${base}/"
-                  # ---- GHCR push (disabled for now; re-enable for drydock) ----
-                  # owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  # ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  # echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  # extra=""; case "${TAG}" in *-*) : ;; *) extra=",latest" ;; esac
-                  # ( cd bin && for db in kb-*.db; do
-                  #     oras push "ghcr.io/${owner}/pgedge-ai-kb/${db}:${TAG}${extra}" \
-                  #         --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
-                  #         "${db}:application/vnd.sqlite3"
-                  #   done )
 
             - name: Cleanup (ollama + API keys)
               if: always()
@@ -583,10 +574,12 @@ jobs:
         env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
-            # Checkout first so the ./.github/actions/setup-oras composite is
-            # available; a later checkout would clean the downloaded bin/ dir.
+            # discover uses only gh + aws (no repo files); check out without
+            # persisting the auth token in .git/config.
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+              with:
+                  persist-credentials: false
 
             - name: Find latest kb-* release
               id: find
@@ -614,9 +607,10 @@ jobs:
                   echo "${KB_TAG}" > bin/RELEASE_TAG
                   ls -lh bin/
 
-            # GHCR push disabled for now — upload to the S3 backup bucket in the
-            # same layout as generate-kb-db so the packaging jobs pull uniformly.
-            # Provider is parsed from each filename (kb-<provider>-<model>.db).
+            # Upload to the S3 backup bucket in the same layout as
+            # generate-kb-db so the packaging jobs pull uniformly (GHCR is
+            # pushed later, once, from validate-kb-db). Provider is parsed from
+            # each filename (kb-<provider>-<model>.db).
             - name: Upload kb.db to S3 backup bucket
               env:
                   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -746,6 +740,34 @@ jobs:
                       done
 
                       echo "${db} validation passed"
+                  done
+
+            # Push to GHCR HERE — once, from this reliable GitHub-hosted runner
+            # that already has every validated DB — rather than from the slow
+            # self-hosted generate cell. These are the artifacts drydock mounts.
+            # continue-on-error: a GHCR hiccup must never block packaging, which
+            # is driven off S3.
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
+
+            - name: Push validated kb.db to GHCR
+              continue-on-error: true
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  # :latest only on a final release (no -test/-beta/-rc/-alpha suffix).
+                  extra=""; case "${TAG}" in *-*) : ;; *) extra=",latest" ;; esac
+                  for db in kb.db.cached/kb-*.db; do
+                      name="$(basename "$db")"
+                      echo "Pushing ${name} -> ${ns}/${name}:${TAG}${extra}"
+                      ( cd kb.db.cached && oras push "${ns}/${name}:${TAG}${extra}" \
+                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
+                          "${name}:application/vnd.sqlite3" )
                   done
 
     # -------------------------------------------------------------------------

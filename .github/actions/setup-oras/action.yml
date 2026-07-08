@@ -23,7 +23,7 @@ runs:
               os="$(uname -s | tr 'A-Z' 'a-z')"
               url="https://github.com/oras-project/oras/releases/download/v${version}/oras_${version}_${os}_${arch}.tar.gz"
               echo "Downloading oras from ${url}"
-              curl -sSL -o "${RUNNER_TEMP}/oras.tar.gz" "${url}"
+              curl -fsSL -o "${RUNNER_TEMP}/oras.tar.gz" "${url}"
               mkdir -p "${HOME}/.local/bin"
               tar -xzf "${RUNNER_TEMP}/oras.tar.gz" -C "${HOME}/.local/bin" oras
               echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
