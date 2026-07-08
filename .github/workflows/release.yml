@@ -742,15 +742,20 @@ jobs:
                       echo "${db} validation passed"
                   done
 
-            # Push to GHCR HERE — once, from this reliable GitHub-hosted runner
-            # that already has every validated DB — rather than from the slow
-            # self-hosted generate cell. These are the artifacts drydock mounts.
-            # continue-on-error: a GHCR hiccup must never block packaging, which
-            # is driven off S3.
+            # Publish to GHCR HERE — once, from this reliable GitHub-hosted
+            # runner that already has every validated DB — rather than from the
+            # slow self-hosted generate cell. Two forms, in separate repos:
+            #   * raw OCI artifact -> pgedge-ai-kb-artifacts/<db>:<tag>-artifact
+            #   * container image  -> pgedge-ai-kb/<db>:<tag>-image, :<tag>,
+            #                         and :latest (final GA only)
+            # The image (FROM scratch + the db) is what drydock mounts via
+            # Image Volume Source; :<tag> and :latest track the IMAGE. :latest
+            # moves only on a final GA tag (no -test/-dev/-rc/-beta/-alpha).
+            # continue-on-error: a GHCR hiccup must never block packaging (S3).
             - name: Install oras
               uses: ./.github/actions/setup-oras
 
-            - name: Push validated kb.db to GHCR
+            - name: Publish kb.db to GHCR (artifacts + images)
               continue-on-error: true
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -758,16 +763,30 @@ jobs:
               run: |
                   set -euo pipefail
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  art_ns="ghcr.io/${owner}/pgedge-ai-kb-artifacts"
+                  img_ns="ghcr.io/${owner}/pgedge-ai-kb"
                   echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  # :latest only on a final release (no -test/-beta/-rc/-alpha suffix).
-                  extra=""; case "${TAG}" in *-*) : ;; *) extra=",latest" ;; esac
+                  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  # Final GA = no pre-release suffix (no '-' in the tag).
+                  final=false; case "${TAG}" in *-*) : ;; *) final=true ;; esac
                   for db in kb.db.cached/kb-*.db; do
                       name="$(basename "$db")"
-                      echo "Pushing ${name} -> ${ns}/${name}:${TAG}${extra}"
-                      ( cd kb.db.cached && oras push "${ns}/${name}:${TAG}${extra}" \
+
+                      # 1) raw OCI artifact (never tagged plain :<tag>)
+                      echo "Artifact -> ${art_ns}/${name}:${TAG}-artifact"
+                      ( cd kb.db.cached && oras push "${art_ns}/${name}:${TAG}-artifact" \
                           --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
                           "${name}:application/vnd.sqlite3" )
+
+                      # 2) container image: :<tag>-image + :<tag> (+ :latest on GA)
+                      img="${img_ns}/${name}"
+                      tags=( -t "${img}:${TAG}-image" -t "${img}:${TAG}" )
+                      if [ "${final}" = true ]; then tags+=( -t "${img}:latest" ); fi
+                      echo "Image -> ${img}:${TAG}-image, :${TAG} (latest=${final})"
+                      docker build --build-arg DB="${name}" -f docker/Dockerfile "${tags[@]}" kb.db.cached
+                      docker push "${img}:${TAG}-image"
+                      docker push "${img}:${TAG}"
+                      if [ "${final}" = true ]; then docker push "${img}:latest"; fi
                   done
 
     # -------------------------------------------------------------------------
