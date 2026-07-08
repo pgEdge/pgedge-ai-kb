@@ -87,6 +87,12 @@ sources:
       project_version: "3.2.2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "cnpg130"
+      doc_path: "docs"
+      project_name: "CloudNativePG"
+      project_version: "1.30"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "vchordbm25030"
       doc_path: "docs"
       project_name: "VectorChord-bm25"
