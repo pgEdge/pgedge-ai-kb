@@ -306,6 +306,9 @@ jobs:
         outputs:
             matrix: ${{ steps.set.outputs.matrix }}
             db-names: ${{ steps.set.outputs.db-names }}
+            # kb.db S3-layout timestamp ONLY — separate from the DNF/APT push
+            # timestamps (dnf_ts/apt_ts); never reuse those here.
+            kb-timestamp: ${{ steps.set.outputs.kb-timestamp }}
         steps:
             - name: Define matrix
               id: set
@@ -321,10 +324,14 @@ jobs:
                   # Derived DB filenames: kb-<provider>-<model>.db — must match
                   # the builder's output naming for a single-provider run.
                   names="$(echo "$matrix" | jq -r '.include[] | "kb-\(.provider)-\(.model).db"' | tr '\n' ' ')"
-                  echo "matrix=${matrix}"        >> "$GITHUB_OUTPUT"
-                  echo "db-names=${names% }"     >> "$GITHUB_OUTPUT"
-                  echo "matrix:   ${matrix}"
-                  echo "db-names: ${names% }"
+                  # kb.db S3-layout timestamp ONLY (not the DNF/APT push ts).
+                  kb_ts="$(date -u +%Y%m%d-%H%M%S)"
+                  echo "matrix=${matrix}"          >> "$GITHUB_OUTPUT"
+                  echo "db-names=${names% }"       >> "$GITHUB_OUTPUT"
+                  echo "kb-timestamp=${kb_ts}"     >> "$GITHUB_OUTPUT"
+                  echo "matrix:       ${matrix}"
+                  echo "db-names:     ${names% }"
+                  echo "kb-timestamp: ${kb_ts}"
 
     generate-kb-db:
         name: Generate ${{ matrix.provider }}/${{ matrix.model }}
@@ -347,124 +354,6 @@ jobs:
 
             - name: Clean build artifacts from previous runs
               run: rm -rf bin/ pgedge-ai-kb-builder examples/pgedge-ai-kb-builder-build.yaml
-
-            # (diag) TEMP self-hosted egress diagnostics — ollama cell only,
-            # runs early (before the ~45-min build) so it can be read and the
-            # run cancelled quickly. UniFi shows a clean LAN, so this checks
-            # the on-host suspects: TLS interception, proxy/VPN, per-endpoint
-            # timing, and actual GHCR upload throughput. Remove once the
-            # runner network is fixed.
-            - name: (diag) Install oras
-              if: matrix.provider == 'ollama'
-              uses: ./.github/actions/setup-oras
-
-            - name: (diag) Self-hosted egress probe
-              if: matrix.provider == 'ollama'
-              continue-on-error: true
-              env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  PROBE_MB: "200"
-                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  # Backup (scratch) bucket only — NOT the live apt/yum repo buckets.
-                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
-              run: |
-                  set +e
-                  # Clean every local artifact this diag creates on step exit,
-                  # so nothing accumulates on the persistent self-hosted runner.
-                  trap 'rm -rf "$RUNNER_TEMP"/egress-probe.bin "$RUNNER_TEMP"/s3-probe.bin "$RUNNER_TEMP"/awscli-home "$RUNNER_TEMP"/awscliv2.pkg "$RUNNER_TEMP"/choices.xml 2>/dev/null' EXIT
-                  echo "== proxy env vars =="; env | grep -iE 'proxy' || echo "(none set)"
-                  echo "== which interface egresses to GitHub/GHCR? (correlate with utun/VPN + MTU below) =="
-                  for h in ghcr.io pkg-containers.githubusercontent.com github.com; do
-                    ip="$(dig +short "$h" 2>/dev/null | grep -m1 -E '^[0-9]+\.' )"
-                    echo "  ${h} (${ip:-?}):"; route get "${ip:-$h}" 2>/dev/null | grep -E 'interface|gateway'
-                  done
-                  echo "== interfaces / MTU (VPN => utun/ipsec/tun/wg) =="
-                  ifconfig 2>/dev/null | grep -E '^[a-z0-9]+:|mtu|inet '
-                  echo "== interceptor/VPN/security agents =="
-                  ps axo comm= 2>/dev/null | grep -iE 'zscaler|netskope|umbrella|littlesnitch|globalprotect|cisco|forcepoint|crowdstrike|santa|openvpn|wireguard|tailscale' | sort -u || echo "(none matched)"
-                  for h in ghcr.io pkg-containers.githubusercontent.com github.com; do
-                    echo "===================== ${h} ====================="
-                    echo "-- TLS issuer (expect a PUBLIC CA; a corp/proxy CA => on-host TLS interception) --"
-                    echo | openssl s_client -connect "${h}:443" -servername "$h" 2>/dev/null | openssl x509 -noout -issuer
-                    echo "-- curl timing --"
-                    curl -sS -o /dev/null -w "   dns=%{time_namelookup}s tls=%{time_appconnect}s ttfb=%{time_starttransfer}s total=%{time_total}s http=%{http_code} httpver=%{http_version}\n" "https://${h}/" 2>&1
-                  done
-                  echo "===================== GHCR upload probe (${PROBE_MB} MB) ====================="
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ref="ghcr.io/${owner}/pgedge-ai-kb/egress-probe:r${GITHUB_RUN_ID}"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  echo "Pushing ${PROBE_MB} MB -> ${ref}"
-                  # cd into the temp dir + relative path so oras doesn't reject
-                  # the absolute path; time the push and compute MB/s via awk -v
-                  # (no nested-quote breakage).
-                  ( cd "$RUNNER_TEMP" \
-                    && head -c $(( PROBE_MB * 1024 * 1024 )) /dev/urandom > egress-probe.bin \
-                    && s=$(date +%s) \
-                    && oras push "$ref" --artifact-type application/vnd.pgedge.egress.probe egress-probe.bin:application/octet-stream ; rc=$? ; e=$(date +%s) \
-                    ; awk -v mb="$PROBE_MB" -v d="$(( e - s ))" -v rc="$rc" 'BEGIN{ if(d<1)d=1; printf "PROBE: rc=%d dur=%ss throughput=%.2f MB/s\n", rc, d, mb/d }' \
-                    ; rm -f egress-probe.bin )
-                  echo "-- download compare (-L to follow redirects; fast download + slow upload => egress-specific) --"
-                  curl -sSL -o /dev/null -w "   download: %{speed_download} B/s in %{time_total}s\n" "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_darwin_arm64.tar.gz" 2>&1
-
-                  echo "===================== NON-GitHub upload probe (100 MB -> S3 BACKUP bucket) ====================="
-                  # Decides machine/ISP vs GitHub-specific: if uploading to S3 is
-                  # ALSO slow, the problem is general egress (host or line), not
-                  # GitHub/Azure. Writes to a throwaway prefix in the BACKUP bucket
-                  # only (never the live apt/yum repo buckets) and deletes it after.
-                  # Bonus: also proves whether an S3 relay would work.
-                  # The runner's Homebrew Python 3.14 is broken (pyexpat symbol
-                  # error), which poisons any brew/pip 'aws' on PATH. Install a
-                  # self-contained AWS CLI v2 into $HOME (NO sudo, bundles its own
-                  # Python) and invoke THAT exact binary — never PATH's aws.
-                  awsroot="$RUNNER_TEMP/awscli-home"
-                  awsbin="$(find "$awsroot" -name aws -type f -perm -u+x 2>/dev/null | head -1)"
-                  if [ -z "$awsbin" ] || ! "$awsbin" --version >/dev/null 2>&1; then
-                    echo "   installing AWS CLI v2 into ${awsroot} (no sudo)..."
-                    rm -rf "$awsroot"; mkdir -p "$awsroot"
-                    printf '%s\n' \
-                      '<?xml version="1.0" encoding="UTF-8"?>' \
-                      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-                      '<plist version="1.0"><array><dict>' \
-                      '<key>choiceAttribute</key><string>customLocation</string>' \
-                      "<key>attributeSetting</key><string>${awsroot}</string>" \
-                      '<key>choiceIdentifier</key><string>default</string>' \
-                      '</dict></array></plist>' > "$RUNNER_TEMP/choices.xml"
-                    curl -sS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg" \
-                      && installer -pkg "$RUNNER_TEMP/awscliv2.pkg" -target CurrentUserHomeDirectory -applyChoiceChangesXML "$RUNNER_TEMP/choices.xml" >/dev/null 2>&1 \
-                      || echo "   (aws v2 install failed)"
-                    awsbin="$(find "$awsroot" -name aws -type f -perm -u+x 2>/dev/null | head -1)"
-                  fi
-                  echo "   aws binary: ${awsbin:-<none>} ($("${awsbin:-false}" --version 2>&1 | head -1))"
-                  if [ -n "$awsbin" ] && "$awsbin" --version >/dev/null 2>&1 && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${S3_BACKUP_BUCKET:-}" ]; then
-                    ( cd "$RUNNER_TEMP" && head -c $(( 100 * 1024 * 1024 )) /dev/urandom > s3-probe.bin
-                      key="_egress-probe/r${GITHUB_RUN_ID}.bin"
-                      s=$(date +%s)
-                      "$awsbin" s3 cp s3-probe.bin "s3://${S3_BACKUP_BUCKET}/${key}" --only-show-errors ; rc=$?
-                      e=$(date +%s); d=$(( e - s )); [ "$d" -lt 1 ] && d=1
-                      if [ "$rc" -eq 0 ]; then
-                        awk -v d="$d" 'BEGIN{ printf "   s3 upload OK: dur=%ss throughput=%.2f MB/s\n", d, 100/d }'
-                      else
-                        echo "   s3 upload FAILED: rc=${rc} after ${d}s (not a throughput number)"
-                      fi
-                      "$awsbin" s3 rm "s3://${S3_BACKUP_BUCKET}/${key}" --only-show-errors 2>/dev/null
-                      rm -f s3-probe.bin )
-                  else
-                    echo "   (skipped: aws cli unavailable, or creds/bucket missing)"
-                  fi
-
-                  echo "===================== DF path-MTU sweep (black-hole check; ICMP may be blocked) ====================="
-                  # If large Don't-Fragment packets FAIL to the GHCR IP while
-                  # small ones pass, a PMTU black hole is throttling uploads.
-                  ghcr_ip="$(dig +short ghcr.io 2>/dev/null | grep -m1 -E '^[0-9]+\.')"
-                  gw_ip="$(route -n get default 2>/dev/null | awk '/gateway/{print $2}')"
-                  for target in "${gw_ip:-192.168.0.1}" "${ghcr_ip:-140.82.112.3}"; do
-                    echo "  target ${target}:"
-                    for sz in 1372 1422 1472; do
-                      if ping -D -c1 -s "$sz" -t 3 "$target" >/dev/null 2>&1; then st=OK; else st=FAIL; fi
-                      echo "    DF payload=${sz} (packet ~$((sz+28))B): ${st}"
-                    done
-                  done
 
             - name: Set up Go
               uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -600,36 +489,63 @@ jobs:
                   [ "$done" = "$total" ] || { echo "::error::${PROVIDER} embedded only ${done} of ${total} chunks"; exit 1; }
                   echo "${PROVIDER}: ${done}/${total} ✓"
 
-            # Push this cell's DB to GHCR as an OCI artifact (replaces the
-            # flaky, 2 GB-capped actions/upload-artifact). Cloud cells push
-            # from ubuntu-latest (reliable); the ollama cell pushes its small
-            # DB from the self-hosted runner. Tag = the release tag; :latest
-            # only on a final release. The same artifacts are what drydock
-            # mounts via Image Volume Source.
-            - name: Install oras
-              uses: ./.github/actions/setup-oras
+            # GHCR push DISABLED for now — the self-hosted (ollama) runner can't
+            # complete oras's monolithic upload (egress diag: 0.27 MB/s -> 400).
+            # Transport via the S3 backup bucket instead (S3 multipart tolerates
+            # the slow uplink). Re-enable GHCR for drydock once the runner
+            # network is fixed. S3 layout:
+            #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
+            # AWS CLI is preinstalled on the cloud (ubuntu) cells; only the
+            # self-hosted ollama runner needs it — and its Homebrew Python is
+            # broken, so install self-contained AWS CLI v2 into $RUNNER_TEMP
+            # (no sudo, no system-dir writes) and prepend it to PATH.
+            - name: Install AWS CLI v2 (ollama self-hosted runner only)
+              if: matrix.provider == 'ollama'
+              run: |
+                  set -e
+                  if aws --version >/dev/null 2>&1; then echo "aws present: $(aws --version)"; exit 0; fi
+                  root="$RUNNER_TEMP/awscli-home"; rm -rf "$root"; mkdir -p "$root"
+                  printf '%s\n' \
+                    '<?xml version="1.0" encoding="UTF-8"?>' \
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+                    '<plist version="1.0"><array><dict>' \
+                    '<key>choiceAttribute</key><string>customLocation</string>' \
+                    "<key>attributeSetting</key><string>${root}</string>" \
+                    '<key>choiceIdentifier</key><string>default</string>' \
+                    '</dict></array></plist>' > "$RUNNER_TEMP/choices.xml"
+                  curl -sS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg"
+                  installer -pkg "$RUNNER_TEMP/awscliv2.pkg" -target CurrentUserHomeDirectory -applyChoiceChangesXML "$RUNNER_TEMP/choices.xml" >/dev/null
+                  bin="$(dirname "$(find "$root" -name aws -type f -perm -u+x | head -1)")"
+                  echo "$bin" >> "$GITHUB_PATH"
+                  "$bin/aws" --version
 
-            - name: Push kb.db artifact to GHCR
+            - name: Upload kb.db to S3 backup bucket
               env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
                   TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.kb-matrix.outputs.kb-timestamp }}
+                  PROVIDER: ${{ matrix.provider }}
               run: |
                   set -euo pipefail
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  extra=""
-                  case "${TAG}" in
-                      *-*) : ;;
-                      *)   extra=",latest" ;;
-                  esac
-                  cd bin
-                  for db in kb-*.db; do
-                      echo "Pushing ${db} -> ${ns}/${db}:${TAG}${extra}"
-                      oras push "${ns}/${db}:${TAG}${extra}" \
-                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
-                          "${db}:application/vnd.sqlite3"
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}/${PROVIDER}/${KB_TS}"
+                  for db in bin/kb-*.db; do
+                      echo "Uploading $(basename "$db") -> ${base}/$(basename "$db")"
+                      aws s3 cp "$db" "${base}/$(basename "$db")" --only-show-errors
                   done
+                  echo "Uploaded to ${base}/"
+                  # ---- GHCR push (disabled for now; re-enable for drydock) ----
+                  # owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  # ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  # echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  # extra=""; case "${TAG}" in *-*) : ;; *) extra=",latest" ;; esac
+                  # ( cd bin && for db in kb-*.db; do
+                  #     oras push "ghcr.io/${owner}/pgedge-ai-kb/${db}:${TAG}${extra}" \
+                  #         --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
+                  #         "${db}:application/vnd.sqlite3"
+                  #   done )
 
             - name: Cleanup (ollama + API keys)
               if: always()
@@ -645,7 +561,7 @@ jobs:
 
     discover-kb-db:
         name: Discover latest published kb.db
-        needs: determine-repo-type
+        needs: [determine-repo-type, kb-matrix]
         # Opt-in alternative path when regenerate_kb_db=false. Downloads
         # whatever the most recent kb-* GitHub release is. Useful for
         # iterating on packaging without spending hours regenerating.
@@ -653,7 +569,6 @@ jobs:
         runs-on: ubuntu-latest
         outputs:
             kb-db-release-tag: ${{ steps.find.outputs.kb-db-release-tag }}
-            db-names: ${{ steps.ghcr.outputs.db-names }}
         env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
@@ -688,41 +603,26 @@ jobs:
                   echo "${KB_TAG}" > bin/RELEASE_TAG
                   ls -lh bin/
 
-            # Push each per-provider DB to GHCR (see generate-kb-db for the
-            # rationale on why GHCR replaces actions/upload-artifact here).
-            - name: Install oras
-              uses: ./.github/actions/setup-oras
-
-            - name: Push kb.db artifacts to GHCR
-              id: ghcr
+            # GHCR push disabled for now — upload to the S3 backup bucket in the
+            # same layout as generate-kb-db so the packaging jobs pull uniformly.
+            # Provider is parsed from each filename (kb-<provider>-<model>.db).
+            - name: Upload kb.db to S3 backup bucket
               env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
                   TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.kb-matrix.outputs.kb-timestamp }}
               run: |
                   set -euo pipefail
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  # Tag each artifact with the release tag (e.g. v1.0.1 or
-                  # v1.0.0-test1). Move :latest ONLY on a final release; a
-                  # pre-release (…-test1/-beta1/-rc1/-alpha1, identified by the
-                  # '-' suffix) must never become :latest.
-                  extra=""
-                  case "${TAG}" in
-                      *-*) : ;;
-                      *)   extra=",latest" ;;
-                  esac
-                  names=""
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
                   cd bin
                   for db in kb-*.db; do
-                      echo "Pushing ${db} -> ${ns}/${db}:${TAG}${extra}"
-                      oras push "${ns}/${db}:${TAG}${extra}" \
-                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
-                          "${db}:application/vnd.sqlite3"
-                      names="${names:+${names} }${db}"
+                      p="${db#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Uploading ${db} -> ${base}/${p}/${KB_TS}/${db}"
+                      aws s3 cp "${db}" "${base}/${p}/${KB_TS}/${db}" --only-show-errors
                   done
-                  echo "db-names=${names}" >> "$GITHUB_OUTPUT"
-                  echo "Pushed: ${names}"
 
     validate-kb-db:
         name: Validate kb.db
@@ -736,10 +636,12 @@ jobs:
               needs.discover-kb-db.result == 'success'
             )
         outputs:
-            # db-names come from the single-source kb-matrix job; the tag used
-            # for both the GHCR ref and package provenance is the release tag.
+            # db-names + kb-timestamp come from the single-source kb-matrix job;
+            # provenance tag is the release tag. Package jobs read all three to
+            # locate the kb DBs in the S3 backup bucket.
             kb-db-release-tag: ${{ needs.determine-repo-type.outputs.effective-tag }}
             db-names: ${{ needs.kb-matrix.outputs.db-names }}
+            kb-timestamp: ${{ needs.kb-matrix.outputs.kb-timestamp }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -747,23 +649,23 @@ jobs:
             - name: Install sqlite3
               run: sudo apt-get update && sudo apt-get install -y sqlite3
 
-            - name: Install oras
-              uses: ./.github/actions/setup-oras
-
-            - name: Pull kb.db artifacts from GHCR
+            - name: Pull kb.db from S3 backup bucket
               env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
                   TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.kb-matrix.outputs.kb-timestamp }}
                   DB_NAMES: ${{ needs.kb-matrix.outputs.db-names }}
               run: |
                   set -euo pipefail
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
                   mkdir -p kb.db.cached
                   for name in ${DB_NAMES}; do
-                      echo "Pulling ${ns}/${name}:${TAG}"
-                      oras pull "${ns}/${name}:${TAG}" -o kb.db.cached
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "kb.db.cached/${name}" --only-show-errors
                   done
                   # RELEASE_TAG carries provenance for the package changelog.
                   echo "${TAG}" > kb.db.cached/RELEASE_TAG
@@ -877,26 +779,24 @@ jobs:
                   os_version="${IMAGE##*:}"
                   echo "os_version=${os_version}" >> "$GITHUB_OUTPUT"
 
-            - name: Install oras
-              uses: ./.github/actions/setup-oras
-
-            - name: Pull validated kb.db from GHCR
+            - name: Pull validated kb.db from S3 backup bucket
               env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
                   TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.validate-kb-db.outputs.kb-timestamp }}
               run: |
                   set -euo pipefail
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
                   mkdir -p pkg/kb.db.cached
                   for name in ${DB_NAMES}; do
-                      echo "Pulling ${ns}/${name}:${TAG}"
-                      oras pull "${ns}/${name}:${TAG}" -o pkg/kb.db.cached
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "pkg/kb.db.cached/${name}" --only-show-errors
                   done
-                  # RELEASE_TAG carries KB build provenance for the package
-                  # changelog; the GHCR ref uses the release tag above.
+                  # RELEASE_TAG carries KB build provenance for the package changelog.
                   echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
                   ls -lh pkg/kb.db.cached/
 
@@ -1084,26 +984,24 @@ jobs:
                   distro="${IMAGE##*:}"
                   echo "distro=${distro}" >> "$GITHUB_OUTPUT"
 
-            - name: Install oras
-              uses: ./.github/actions/setup-oras
-
-            - name: Pull validated kb.db from GHCR
+            - name: Pull validated kb.db from S3 backup bucket
               env:
-                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
                   DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
                   TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.validate-kb-db.outputs.kb-timestamp }}
               run: |
                   set -euo pipefail
-                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
-                  ns="ghcr.io/${owner}/pgedge-ai-kb"
-                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
                   mkdir -p pkg/kb.db.cached
                   for name in ${DB_NAMES}; do
-                      echo "Pulling ${ns}/${name}:${TAG}"
-                      oras pull "${ns}/${name}:${TAG}" -o pkg/kb.db.cached
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "pkg/kb.db.cached/${name}" --only-show-errors
                   done
-                  # RELEASE_TAG carries KB build provenance for the package
-                  # changelog; the GHCR ref uses the release tag above.
+                  # RELEASE_TAG carries KB build provenance for the package changelog.
                   echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
                   ls -lh pkg/kb.db.cached/
 
