@@ -503,7 +503,9 @@ jobs:
               if: matrix.provider == 'ollama'
               run: |
                   set -e
-                  if aws --version >/dev/null 2>&1; then echo "aws present: $(aws --version)"; exit 0; fi
+                  # brew's `aws --version` SUCCEEDS but `aws s3` FAILS here
+                  # (broken pyexpat), so never trust PATH's aws — always install
+                  # a fresh self-contained v2.
                   root="$RUNNER_TEMP/awscli-home"; rm -rf "$root"; mkdir -p "$root"
                   printf '%s\n' \
                     '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -530,10 +532,14 @@ jobs:
                   PROVIDER: ${{ matrix.provider }}
               run: |
                   set -euo pipefail
+                  # Use the v2 binary installed for the ollama cell; on cloud
+                  # cells that dir doesn't exist, fall back to the preinstalled aws.
+                  AWS="$(find "$RUNNER_TEMP/awscli-home" -name aws -type f -perm -u+x 2>/dev/null | head -1)"; [ -n "$AWS" ] || AWS=aws
+                  "$AWS" --version
                   base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}/${PROVIDER}/${KB_TS}"
                   for db in bin/kb-*.db; do
                       echo "Uploading $(basename "$db") -> ${base}/$(basename "$db")"
-                      aws s3 cp "$db" "${base}/$(basename "$db")" --only-show-errors
+                      "$AWS" s3 cp "$db" "${base}/$(basename "$db")" --only-show-errors
                   done
                   echo "Uploaded to ${base}/"
                   # ---- GHCR push (disabled for now; re-enable for drydock) ----
