@@ -370,6 +370,9 @@ jobs:
                   S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
               run: |
                   set +e
+                  # Clean every local artifact this diag creates on step exit,
+                  # so nothing accumulates on the persistent self-hosted runner.
+                  trap 'rm -rf "$RUNNER_TEMP"/egress-probe.bin "$RUNNER_TEMP"/s3-probe.bin "$RUNNER_TEMP"/awscli-home "$RUNNER_TEMP"/awscliv2.pkg "$RUNNER_TEMP"/choices.xml 2>/dev/null' EXIT
                   echo "== proxy env vars =="; env | grep -iE 'proxy' || echo "(none set)"
                   echo "== which interface egresses to GitHub/GHCR? (correlate with utun/VPN + MTU below) =="
                   for h in ghcr.io pkg-containers.githubusercontent.com github.com; do
@@ -410,21 +413,29 @@ jobs:
                   # GitHub/Azure. Writes to a throwaway prefix in the BACKUP bucket
                   # only (never the live apt/yum repo buckets) and deletes it after.
                   # Bonus: also proves whether an S3 relay would work.
-                  # Install AWS CLI v2 (self-contained — bundles its own Python, so
-                  # it's immune to this runner's broken Homebrew Python). Needs
-                  # passwordless sudo; skips cleanly if unavailable. Prefer a v2
-                  # binary over any broken brew/pip 'aws' already on PATH.
-                  awsbin="$(command -v /usr/local/bin/aws || command -v aws || true)"
-                  if ! "${awsbin:-aws}" --version >/dev/null 2>&1; then
-                    echo "   aws cli missing/broken — installing AWS CLI v2 pkg (sudo -n)..."
-                    if curl -sS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg" \
-                       && sudo -n installer -pkg "$RUNNER_TEMP/awscliv2.pkg" -target / >/dev/null 2>&1; then
-                      awsbin="/usr/local/bin/aws"
-                    else
-                      echo "   (aws v2 install failed — no passwordless sudo, or download blocked)"
-                      awsbin=""
-                    fi
+                  # The runner's Homebrew Python 3.14 is broken (pyexpat symbol
+                  # error), which poisons any brew/pip 'aws' on PATH. Install a
+                  # self-contained AWS CLI v2 into $HOME (NO sudo, bundles its own
+                  # Python) and invoke THAT exact binary — never PATH's aws.
+                  awsroot="$RUNNER_TEMP/awscli-home"
+                  awsbin="$(find "$awsroot" -name aws -type f -perm -u+x 2>/dev/null | head -1)"
+                  if [ -z "$awsbin" ] || ! "$awsbin" --version >/dev/null 2>&1; then
+                    echo "   installing AWS CLI v2 into ${awsroot} (no sudo)..."
+                    rm -rf "$awsroot"; mkdir -p "$awsroot"
+                    printf '%s\n' \
+                      '<?xml version="1.0" encoding="UTF-8"?>' \
+                      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+                      '<plist version="1.0"><array><dict>' \
+                      '<key>choiceAttribute</key><string>customLocation</string>' \
+                      "<key>attributeSetting</key><string>${awsroot}</string>" \
+                      '<key>choiceIdentifier</key><string>default</string>' \
+                      '</dict></array></plist>' > "$RUNNER_TEMP/choices.xml"
+                    curl -sS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg" \
+                      && installer -pkg "$RUNNER_TEMP/awscliv2.pkg" -target CurrentUserHomeDirectory -applyChoiceChangesXML "$RUNNER_TEMP/choices.xml" >/dev/null 2>&1 \
+                      || echo "   (aws v2 install failed)"
+                    awsbin="$(find "$awsroot" -name aws -type f -perm -u+x 2>/dev/null | head -1)"
                   fi
+                  echo "   aws binary: ${awsbin:-<none>} ($("${awsbin:-false}" --version 2>&1 | head -1))"
                   if [ -n "$awsbin" ] && "$awsbin" --version >/dev/null 2>&1 && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${S3_BACKUP_BUCKET:-}" ]; then
                     ( cd "$RUNNER_TEMP" && head -c $(( 100 * 1024 * 1024 )) /dev/urandom > s3-probe.bin
                       key="_egress-probe/r${GITHUB_RUN_ID}.bin"
