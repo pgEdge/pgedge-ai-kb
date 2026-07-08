@@ -364,6 +364,10 @@ jobs:
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   PROBE_MB: "200"
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  # Backup (scratch) bucket only — NOT the live apt/yum repo buckets.
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
               run: |
                   set +e
                   echo "== proxy env vars =="; env | grep -iE 'proxy' || echo "(none set)"
@@ -399,6 +403,38 @@ jobs:
                     ; rm -f egress-probe.bin )
                   echo "-- download compare (-L to follow redirects; fast download + slow upload => egress-specific) --"
                   curl -sSL -o /dev/null -w "   download: %{speed_download} B/s in %{time_total}s\n" "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_darwin_arm64.tar.gz" 2>&1
+
+                  echo "===================== NON-GitHub upload probe (100 MB -> S3 BACKUP bucket) ====================="
+                  # Decides machine/ISP vs GitHub-specific: if uploading to S3 is
+                  # ALSO slow, the problem is general egress (host or line), not
+                  # GitHub/Azure. Writes to a throwaway prefix in the BACKUP bucket
+                  # only (never the live apt/yum repo buckets) and deletes it after.
+                  # Bonus: also proves whether an S3 relay would work.
+                  if command -v aws >/dev/null 2>&1 && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${S3_BACKUP_BUCKET:-}" ]; then
+                    ( cd "$RUNNER_TEMP" && head -c $(( 100 * 1024 * 1024 )) /dev/urandom > s3-probe.bin
+                      key="_egress-probe/r${GITHUB_RUN_ID}.bin"
+                      s=$(date +%s)
+                      aws s3 cp s3-probe.bin "s3://${S3_BACKUP_BUCKET}/${key}" --only-show-errors ; rc=$?
+                      e=$(date +%s)
+                      awk -v d="$(( e - s ))" -v rc="$rc" 'BEGIN{ if(d<1)d=1; printf "   s3 upload: rc=%d dur=%ss throughput=%.2f MB/s\n", rc, d, 100/d }'
+                      aws s3 rm "s3://${S3_BACKUP_BUCKET}/${key}" --only-show-errors 2>/dev/null
+                      rm -f s3-probe.bin )
+                  else
+                    echo "   (skipped: aws cli or AWS_ACCESS_KEY_ID/S3_BACKUP_BUCKET not available on this runner)"
+                  fi
+
+                  echo "===================== DF path-MTU sweep (black-hole check; ICMP may be blocked) ====================="
+                  # If large Don't-Fragment packets FAIL to the GHCR IP while
+                  # small ones pass, a PMTU black hole is throttling uploads.
+                  ghcr_ip="$(dig +short ghcr.io 2>/dev/null | grep -m1 -E '^[0-9]+\.')"
+                  gw_ip="$(route -n get default 2>/dev/null | awk '/gateway/{print $2}')"
+                  for target in "${gw_ip:-192.168.0.1}" "${ghcr_ip:-140.82.112.3}"; do
+                    echo "  target ${target}:"
+                    for sz in 1372 1422 1472; do
+                      if ping -D -c1 -s "$sz" -t 3 "$target" >/dev/null 2>&1; then st=OK; else st=FAIL; fi
+                      echo "    DF payload=${sz} (packet ~$((sz+28))B): ${st}"
+                    done
+                  done
 
             - name: Set up Go
               uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
