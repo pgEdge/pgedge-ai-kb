@@ -630,7 +630,7 @@ jobs:
                   done
 
     validate-kb-db:
-        name: Validate kb.db
+        name: Validate & publish kb.db (GHCR artifacts + images)
         runs-on: ubuntu-latest
         # Gate downstream packaging. Runs after whichever upstream produced
         # the artifact; downstream `needs: validate-kb-db` ensures sequencing.
