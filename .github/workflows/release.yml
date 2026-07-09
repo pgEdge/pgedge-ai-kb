@@ -199,21 +199,15 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist/
 
-            - name: Download kb.db
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: dist/
-
+            # The kb DBs are no longer attached to the GitHub release; they are
+            # transported via the S3 backup bucket and published to GHCR from
+            # validate-kb-db. GitHub release assets are hard-capped at 2 GB,
+            # which the multi-GB kb.db exceeded and failed this step. The
+            # release now carries only the binary tarballs.
             - name: Generate checksums
               run: |
                   cd dist
-                  # RELEASE_TAG is an internal coordination file (consumed
-                  # by build-rpm.sh / build-deb.sh inside the build container)
-                  # and isn't a user-facing artifact, so it's not checksummed
-                  # and isn't listed in the release files below.
-                  sha256sum *.tar.gz *.zip kb-*.db > checksums.txt
+                  sha256sum *.tar.gz *.zip > checksums.txt
                   cat checksums.txt
 
             - name: Create GitHub Release
@@ -222,7 +216,6 @@ jobs:
                   files: |
                       dist/*.tar.gz
                       dist/*.zip
-                      dist/kb-*.db
                       dist/checksums.txt
                   generate_release_notes: true
                   draft: false
@@ -289,25 +282,71 @@ jobs:
                   echo "Routed suffix '$SUFFIX' → repo_type=$repo_type"
 
     # -------------------------------------------------------------------------
-    # kb.db sourcing — either generate inline or discover latest published.
-    # Exactly one of generate-kb-db / discover-kb-db runs per workflow run;
-    # both produce one artifact per provider (kb-db-openai, kb-db-voyage,
-    # kb-db-gemini, kb-db-ollama) plus a kb-db-meta artifact holding the
-    # RELEASE_TAG file. Downstream jobs recombine them with
-    # `pattern: kb-db-*` + `merge-multiple: true`. validate-kb-db is the
-    # downstream gate.
+    # kb.db sourcing — either regenerate (per-provider parallel matrix) or
+    # discover the latest published kb-* release. Exactly one path runs per
+    # workflow run. Both upload one DB per provider to the S3 backup bucket at
+    #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
+    # (this replaces the flaky, 2 GB-capped actions/upload-artifact hand-off).
+    # validate-kb-db then pulls them, gates packaging, and pushes them to GHCR
+    # once from a reliable GH-hosted runner. The set of DB basenames + the
+    # shared kb-timestamp are defined once in kb-matrix and read back by the
+    # packaging jobs.
     # -------------------------------------------------------------------------
 
+    # -------------------------------------------------------------------------
+    # KB provider/model matrix — single source of truth for what gets built.
+    # Each row becomes one PARALLEL generate-kb-db cell and one S3 object
+    # named kb-<provider>-<model>.db. Add a row to build another model (a
+    # provider may have several). Ollama MUST stay on the self-hosted runner
+    # (embedding on GitHub-hosted runners fails); cloud providers run on
+    # ubuntu-latest. `db-names` is the derived list downstream jobs pull.
+    # -------------------------------------------------------------------------
+    kb-matrix:
+        name: KB provider/model matrix
+        runs-on: ubuntu-latest
+        outputs:
+            matrix: ${{ steps.set.outputs.matrix }}
+            db-names: ${{ steps.set.outputs.db-names }}
+            # kb.db S3-layout timestamp ONLY — separate from the DNF/APT push
+            # timestamps (dnf_ts/apt_ts); never reuse those here.
+            kb-timestamp: ${{ steps.set.outputs.kb-timestamp }}
+        steps:
+            - name: Define matrix
+              id: set
+              run: |
+                  set -euo pipefail
+                  matrix='{"include":[
+                    {"provider":"openai","label":"OpenAI","model":"text-embedding-3-small","runner":"ubuntu-latest"},
+                    {"provider":"voyage","label":"Voyage","model":"voyage-3","runner":"ubuntu-latest"},
+                    {"provider":"gemini","label":"Gemini","model":"gemini-embedding-001","runner":"ubuntu-latest"},
+                    {"provider":"ollama","label":"Ollama","model":"nomic-embed-text","runner":["ollama","self-hosted"]}
+                  ]}'
+                  matrix="$(echo "$matrix" | jq -c .)"
+                  # Derived DB filenames: kb-<provider>-<model>.db — must match
+                  # the builder's output naming for a single-provider run.
+                  names="$(echo "$matrix" | jq -r '.include[] | "kb-\(.provider)-\(.model).db"' | tr '\n' ' ')"
+                  # kb.db S3-layout timestamp ONLY (not the DNF/APT push ts).
+                  kb_ts="$(date -u +%Y%m%d-%H%M%S)"
+                  echo "matrix=${matrix}"          >> "$GITHUB_OUTPUT"
+                  echo "db-names=${names% }"       >> "$GITHUB_OUTPUT"
+                  echo "kb-timestamp=${kb_ts}"     >> "$GITHUB_OUTPUT"
+                  echo "matrix:       ${matrix}"
+                  echo "db-names:     ${names% }"
+                  echo "kb-timestamp: ${kb_ts}"
+
     generate-kb-db:
-        name: Generate kb.db (inline)
-        needs: determine-repo-type
+        name: Generate ${{ matrix.provider }}/${{ matrix.model }}
+        needs: [determine-repo-type, kb-matrix]
         # Default behavior is to regenerate. Set workflow_dispatch input
         # `regenerate_kb_db: false` to skip and use the latest published
         # kb-* release instead.
         if: github.event.inputs.regenerate_kb_db != 'false'
-        runs-on: [ollama, self-hosted]
-        outputs:
-            kb-db-release-tag: ${{ steps.tag.outputs.kb-db-release-tag }}
+        # Per-cell runner: cloud providers on ubuntu-latest; ollama pinned to
+        # the self-hosted runner (see kb-matrix).
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJSON(needs.kb-matrix.outputs.matrix) }}
         steps:
             - name: Checkout code
               uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -334,6 +373,7 @@ jobs:
                   GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig" git config --global url."https://x-access-token:${PGEDGE_BUILDER_TOKEN}@github.com/".insteadOf "https://github.com/"
 
             - name: Start Ollama service
+              if: matrix.provider == 'ollama'
               run: |
                   ollama serve &
                   echo $! > "$RUNNER_TEMP/ollama.pid"
@@ -342,39 +382,37 @@ jobs:
                     sleep 2; elapsed=$((elapsed + 2))
                     if [ "$elapsed" -ge "$timeout" ]; then echo "Ollama did not start within ${timeout}s"; exit 1; fi
                   done
-                  ollama pull nomic-embed-text
-                  echo "Ollama ready with nomic-embed-text"
+                  ollama pull "${{ matrix.model }}"
+                  echo "Ollama ready with ${{ matrix.model }}"
 
             - name: Build kb-builder binary
               run: CGO_ENABLED=0 go build -o pgedge-ai-kb-builder ./cmd/kb-builder
 
             - name: Setup API keys for kb-builder
+              # All cloud keys are staged on every cell (secrets are available
+              # to all runners); the config only reads the enabled provider's.
               env:
                   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
                   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
               run: |
-                  [ -n "$OPENAI_API_KEY" ] || { echo "OPENAI_API_KEY secret is missing"; exit 1; }
-                  [ -n "$VOYAGE_API_KEY" ] || { echo "VOYAGE_API_KEY secret is missing"; exit 1; }
-                  [ -n "$GEMINI_API_KEY" ] || { echo "GEMINI_API_KEY secret is missing"; exit 1; }
                   mkdir -p "$API_KEYS_DIR"
-                  printf '%s' "$OPENAI_API_KEY" > "$API_KEYS_DIR/openai-key"
-                  printf '%s' "$VOYAGE_API_KEY" > "$API_KEYS_DIR/voyage-key"
-                  printf '%s' "$GEMINI_API_KEY" > "$API_KEYS_DIR/gemini-key"
+                  printf '%s' "${OPENAI_API_KEY:-}" > "$API_KEYS_DIR/openai-key"
+                  printf '%s' "${VOYAGE_API_KEY:-}" > "$API_KEYS_DIR/voyage-key"
+                  printf '%s' "${GEMINI_API_KEY:-}" > "$API_KEYS_DIR/gemini-key"
                   chmod 600 "$API_KEYS_DIR"/*
 
-            - name: Configure kb-builder for cloud providers
+            - name: Configure kb-builder (this provider/model only)
               env:
                   API_KEYS_DIR: ${{ runner.temp }}/api-keys
+                  KEEP: ${{ matrix.provider }}
+                  MODEL: ${{ matrix.model }}
               run: |
                   set -euo pipefail
                   cfg=examples/pgedge-ai-kb-builder-build.yaml
                   cp examples/pgedge-ai-kb-builder.yaml "${cfg}"
-                  # Single sed invocation with multiple -e expressions, then
-                  # write-to-temp + mv. Avoids `sed -i ''` (BSD-only) and
-                  # `sed -i` (GNU-only); this form works on both since the
-                  # self-hosted runner OS isn't pinned here.
+                  # Portable form (no `sed -i`, which differs BSD vs GNU).
                   sed \
                       -e 's|database_path: "bin/pgedge-ai-kb.db"|database_path: "bin/kb.db"|' \
                       -e "s|api_key_file: \"~/.openai-api-key\"|api_key_file: \"${API_KEYS_DIR}/openai-key\"|" \
@@ -383,11 +421,27 @@ jobs:
                       -e 's|git@github.com:|https://github.com/|g' \
                       "${cfg}" > "${cfg}.new"
                   mv "${cfg}.new" "${cfg}"
-                  grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "database_path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/openai-key\"" "${cfg}" || { echo "OpenAI key path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/voyage-key\"" "${cfg}" || { echo "Voyage key path replacement failed"; exit 1; }
-                  grep -q "api_key_file: \"${API_KEYS_DIR}/gemini-key\"" "${cfg}" || { echo "Gemini key path replacement failed"; exit 1; }
-                  grep -q 'https://github.com/' "${cfg}" || { echo "SSH URL replacement failed"; exit 1; }
+                  # Enable ONLY this cell's provider and pin its model. `p` is
+                  # the current 4-space section header; enabled/model edits are
+                  # guarded to the four provider blocks.
+                  awk -v keep="${KEEP}" -v model="${MODEL}" '
+                    /^    [A-Za-z0-9_]+:[[:space:]]*$/ { p=$1; sub(/:$/,"",p) }
+                    /^        enabled:/ && (p=="openai"||p=="voyage"||p=="gemini"||p=="ollama") {
+                      if (p!=keep) sub(/true/,"false"); print; next
+                    }
+                    /^        model:/ && p==keep {
+                      sub(/model:.*/, "model: \"" model "\""); print; next
+                    }
+                    { print }
+                  ' "${cfg}" > "${cfg}.new"
+                  mv "${cfg}.new" "${cfg}"
+                  grep -q 'database_path: "bin/kb.db"' "${cfg}" || { echo "::error::db path repl failed"; exit 1; }
+                  # Exactly the kept provider must be enabled.
+                  enabled="$(awk '
+                    /^    [A-Za-z0-9_]+:[[:space:]]*$/ { p=$1; sub(/:$/,"",p) }
+                    /^        enabled: true/ && (p=="openai"||p=="voyage"||p=="gemini"||p=="ollama") { print p }
+                  ' "${cfg}" | tr "\n" " " | sed "s/ $//")"
+                  [ "${enabled}" = "${KEEP}" ] || { echo "::error::enabled='${enabled}' expected '${KEEP}'"; cat "${cfg}"; exit 1; }
 
             - name: Generate kb.db (capturing log for coverage check)
               env:
@@ -395,12 +449,12 @@ jobs:
                   VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
               run: |
                   mkdir -p bin
-                  # Tee preserves the log for the per-provider coverage check
-                  # while still streaming to the workflow's live log.
+                  # Tee preserves the log for the coverage check while still
+                  # streaming to the workflow's live log.
                   ./pgedge-ai-kb-builder --config examples/pgedge-ai-kb-builder-build.yaml --max-retries 50 \
                     2>&1 | tee bin/kb-builder.log
 
-            - name: Verify databases were created
+            - name: Verify database was created
               run: |
                   set -euo pipefail
                   shopt -s nullglob
@@ -421,45 +475,79 @@ jobs:
                   done
                   [ "$fail" -eq 0 ] || exit 1
 
-            - name: Verify per-provider coverage (OpenAI, Voyage, Gemini, Ollama)
-              # Each provider must log a "<Provider>: Processed N/M chunks"
-              # line where the LAST such line shows N == M (every batch
-              # finished). Strict mode: all four providers must be present.
-              # If a provider is intentionally disabled in the config, this
-              # check will fail — that's intentional per release policy.
+            - name: Verify provider coverage (${{ matrix.label }})
+              # The last "<Provider>: Processed N/M chunks" line must show N==M.
+              env:
+                  PROVIDER: ${{ matrix.label }}
               run: |
                   set -euo pipefail
                   log=bin/kb-builder.log
                   [ -f "$log" ] || { echo "::error::kb-builder.log missing"; exit 1; }
+                  last=$(grep -E "^[[:space:]]*${PROVIDER}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
+                  [ -n "$last" ] || { echo "::error::${PROVIDER}: no 'Processed X/Y chunks' lines in log"; exit 1; }
+                  done=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\1|')
+                  total=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\2|')
+                  [ "$done" = "$total" ] || { echo "::error::${PROVIDER} embedded only ${done} of ${total} chunks"; exit 1; }
+                  echo "${PROVIDER}: ${done}/${total} ✓"
 
-                  fail=0
-                  for provider in OpenAI Voyage Gemini Ollama; do
-                      last=$(grep -E "^[[:space:]]*${provider}: Processed [0-9]+/[0-9]+ chunks$" "$log" | tail -n 1 || true)
-                      if [ -z "$last" ]; then
-                          echo "::error::${provider}: no 'Processed X/Y chunks' lines in log (provider missing or disabled)"
-                          fail=1
-                          continue
-                      fi
-                      done=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\1|')
-                      total=$(echo "$last" | sed -E 's|.*Processed ([0-9]+)/([0-9]+).*|\2|')
-                      if [ "$done" = "$total" ]; then
-                          echo "${provider}: ${done}/${total} ✓"
-                      else
-                          echo "::error::${provider} embedded only ${done} of ${total} chunks"
-                          fail=1
-                      fi
-                  done
-                  [ "$fail" = "0" ] || exit 1
-
-            - name: Compute synthetic release tag
-              id: tag
+            # Each cell uploads its DB to the S3 backup bucket — S3 multipart
+            # tolerates the self-hosted runner's slow uplink, unlike oras's
+            # monolithic PUT (which failed at ~0.27 MB/s -> 400). GHCR is NOT
+            # pushed from here: validate-kb-db pushes to GHCR once, from a
+            # reliable GH-hosted runner. S3 layout:
+            #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
+            # AWS CLI is preinstalled on the cloud (ubuntu) cells; only the
+            # self-hosted ollama runner needs it — and its Homebrew Python is
+            # broken, so install self-contained AWS CLI v2 into $RUNNER_TEMP
+            # (no sudo, no system-dir writes) and prepend it to PATH.
+            - name: Install AWS CLI v2 (ollama self-hosted runner only)
+              if: matrix.provider == 'ollama'
               run: |
-                  # Synthetic tag for an inline-generated kb.db. Embeds the
-                  # workflow run ID so packaging traces back unambiguously.
-                  tag="kb-$(date -u +%Y-%m-%d)-r${GITHUB_RUN_ID}"
-                  echo "kb-db-release-tag=${tag}" >> "$GITHUB_OUTPUT"
-                  echo "${tag}" > bin/RELEASE_TAG
-                  echo "Generated: ${tag}"
+                  set -e
+                  # brew's `aws --version` SUCCEEDS but `aws s3` FAILS here
+                  # (broken pyexpat), so never trust PATH's aws — always install
+                  # a fresh self-contained v2.
+                  root="$RUNNER_TEMP/awscli-home"; rm -rf "$root"; mkdir -p "$root"
+                  printf '%s\n' \
+                    '<?xml version="1.0" encoding="UTF-8"?>' \
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+                    '<plist version="1.0"><array><dict>' \
+                    '<key>choiceAttribute</key><string>customLocation</string>' \
+                    "<key>attributeSetting</key><string>${root}</string>" \
+                    '<key>choiceIdentifier</key><string>default</string>' \
+                    '</dict></array></plist>' > "$RUNNER_TEMP/choices.xml"
+                  curl -fsS "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/awscliv2.pkg"
+                  installer -pkg "$RUNNER_TEMP/awscliv2.pkg" -target CurrentUserHomeDirectory -applyChoiceChangesXML "$RUNNER_TEMP/choices.xml" >/dev/null
+                  bin="$(dirname "$(find "$root" -name aws -type f -perm -u+x | head -1)")"
+                  echo "$bin" >> "$GITHUB_PATH"
+                  "$bin/aws" --version
+
+            - name: Upload kb.db to S3 backup bucket
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.kb-matrix.outputs.kb-timestamp }}
+                  PROVIDER: ${{ matrix.provider }}
+              run: |
+                  set -euo pipefail
+                  # Use the v2 binary installed for the ollama cell; on cloud
+                  # cells that dir doesn't exist, fall back to the preinstalled
+                  # aws. Guarded so a missing dir can't trip set -e/pipefail.
+                  AWS=aws
+                  if [ -d "$RUNNER_TEMP/awscli-home" ]; then
+                      v2="$(find "$RUNNER_TEMP/awscli-home" -name aws -type f -perm -u+x 2>/dev/null | head -1 || true)"
+                      if [ -n "$v2" ]; then AWS="$v2"; fi
+                  fi
+                  "$AWS" --version
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}/${PROVIDER}/${KB_TS}"
+                  for db in bin/kb-*.db; do
+                      echo "Uploading $(basename "$db") -> ${base}/$(basename "$db")"
+                      "$AWS" s3 cp "$db" "${base}/$(basename "$db")" --only-show-errors
+                  done
+                  echo "Uploaded to ${base}/"
 
             - name: Cleanup (ollama + API keys)
               if: always()
@@ -473,57 +561,9 @@ jobs:
                   rm -rf "$API_KEYS_DIR"
                   rm -f "$RUNNER_TEMP/gitconfig"
 
-            # One artifact per provider instead of a single ~2 GB bundle.
-            # A self-hosted runner's upload is slow enough that a single
-            # multi-GB upload outlives the Azure SAS token and fails with
-            # "Server failed to authenticate the request". Each step here
-            # gets a fresh token at its own start, and the largest single
-            # DB is well under that window, so no upload races the clock.
-            # Downstream jobs pull them back with `pattern: kb-db-*` +
-            # `merge-multiple: true`, reproducing the original flat layout.
-            - name: Upload kb.db artifact (OpenAI)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-openai
-                  path: bin/kb-openai-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Voyage)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-voyage
-                  path: bin/kb-voyage-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Gemini)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-gemini
-                  path: bin/kb-gemini-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Ollama)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-ollama
-                  path: bin/kb-ollama-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb release tag (meta)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-meta
-                  path: bin/RELEASE_TAG
-                  if-no-files-found: error
-                  retention-days: 7
-
     discover-kb-db:
         name: Discover latest published kb.db
-        needs: determine-repo-type
+        needs: [determine-repo-type, kb-matrix]
         # Opt-in alternative path when regenerate_kb_db=false. Downloads
         # whatever the most recent kb-* GitHub release is. Useful for
         # iterating on packaging without spending hours regenerating.
@@ -534,6 +574,13 @@ jobs:
         env:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
+            # discover uses only gh + aws (no repo files); check out without
+            # persisting the auth token in .git/config.
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+              with:
+                  persist-credentials: false
+
             - name: Find latest kb-* release
               id: find
               run: |
@@ -560,79 +607,74 @@ jobs:
                   echo "${KB_TAG}" > bin/RELEASE_TAG
                   ls -lh bin/
 
-            # One artifact per provider instead of a single ~2 GB bundle.
-            # A self-hosted runner's upload is slow enough that a single
-            # multi-GB upload outlives the Azure SAS token and fails with
-            # "Server failed to authenticate the request". Each step here
-            # gets a fresh token at its own start, and the largest single
-            # DB is well under that window, so no upload races the clock.
-            # Downstream jobs pull them back with `pattern: kb-db-*` +
-            # `merge-multiple: true`, reproducing the original flat layout.
-            - name: Upload kb.db artifact (OpenAI)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-openai
-                  path: bin/kb-openai-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Voyage)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-voyage
-                  path: bin/kb-voyage-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Gemini)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-gemini
-                  path: bin/kb-gemini-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb.db artifact (Ollama)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-ollama
-                  path: bin/kb-ollama-*.db
-                  if-no-files-found: error
-                  retention-days: 7
-
-            - name: Upload kb release tag (meta)
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: kb-db-meta
-                  path: bin/RELEASE_TAG
-                  if-no-files-found: error
-                  retention-days: 7
+            # Upload to the S3 backup bucket in the same layout as
+            # generate-kb-db so the packaging jobs pull uniformly (GHCR is
+            # pushed later, once, from validate-kb-db). Provider is parsed from
+            # each filename (kb-<provider>-<model>.db).
+            - name: Upload kb.db to S3 backup bucket
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.kb-matrix.outputs.kb-timestamp }}
+              run: |
+                  set -euo pipefail
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
+                  cd bin
+                  for db in kb-*.db; do
+                      p="${db#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Uploading ${db} -> ${base}/${p}/${KB_TS}/${db}"
+                      aws s3 cp "${db}" "${base}/${p}/${KB_TS}/${db}" --only-show-errors
+                  done
 
     validate-kb-db:
-        name: Validate kb.db
+        name: Validate & publish kb.db (GHCR artifacts + images)
         runs-on: ubuntu-latest
         # Gate downstream packaging. Runs after whichever upstream produced
         # the artifact; downstream `needs: validate-kb-db` ensures sequencing.
-        needs: [determine-repo-type, generate-kb-db, discover-kb-db]
+        needs: [determine-repo-type, kb-matrix, generate-kb-db, discover-kb-db]
         if: |
             always() && (
               needs.generate-kb-db.result == 'success' ||
               needs.discover-kb-db.result == 'success'
             )
         outputs:
-            # Proxy the upstream's tag so downstream consumers have one
-            # place to look (whether the kb.db was generated or discovered).
-            kb-db-release-tag: ${{ needs.generate-kb-db.outputs.kb-db-release-tag || needs.discover-kb-db.outputs.kb-db-release-tag }}
+            # db-names + kb-timestamp come from the single-source kb-matrix job;
+            # provenance tag is the release tag. Package jobs read all three to
+            # locate the kb DBs in the S3 backup bucket.
+            kb-db-release-tag: ${{ needs.determine-repo-type.outputs.effective-tag }}
+            db-names: ${{ needs.kb-matrix.outputs.db-names }}
+            kb-timestamp: ${{ needs.kb-matrix.outputs.kb-timestamp }}
         steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
             - name: Install sqlite3
               run: sudo apt-get update && sudo apt-get install -y sqlite3
 
-            - name: Download kb.db artifacts
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: kb.db.cached/
+            - name: Pull kb.db from S3 backup bucket
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.kb-matrix.outputs.kb-timestamp }}
+                  DB_NAMES: ${{ needs.kb-matrix.outputs.db-names }}
+              run: |
+                  set -euo pipefail
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
+                  mkdir -p kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "kb.db.cached/${name}" --only-show-errors
+                  done
+                  # RELEASE_TAG carries provenance for the package changelog.
+                  echo "${TAG}" > kb.db.cached/RELEASE_TAG
+                  ls -lh kb.db.cached/
 
             - name: Validate schema, row counts, embedding dimensions
               run: |
@@ -700,6 +742,53 @@ jobs:
                       echo "${db} validation passed"
                   done
 
+            # Publish to GHCR HERE — once, from this reliable GitHub-hosted
+            # runner that already has every validated DB — rather than from the
+            # slow self-hosted generate cell. Two forms, in separate repos:
+            #   * raw OCI artifact -> pgedge-ai-kb-artifacts/<db>:<tag>-artifact
+            #   * container image  -> pgedge-ai-kb/<db>:<tag>-image, :<tag>,
+            #                         and :latest (final GA only)
+            # The image (FROM scratch + the db) is what drydock mounts via
+            # Image Volume Source; :<tag> and :latest track the IMAGE. :latest
+            # moves only on a final GA tag (no -test/-dev/-rc/-beta/-alpha).
+            # continue-on-error: a GHCR hiccup must never block packaging (S3).
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
+
+            - name: Publish kb.db to GHCR (artifacts + images)
+              continue-on-error: true
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  art_ns="ghcr.io/${owner}/pgedge-ai-kb-artifacts"
+                  img_ns="ghcr.io/${owner}/pgedge-ai-kb"
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  # Final GA = no pre-release suffix (no '-' in the tag).
+                  final=false; case "${TAG}" in *-*) : ;; *) final=true ;; esac
+                  for db in kb.db.cached/kb-*.db; do
+                      name="$(basename "$db")"
+
+                      # 1) raw OCI artifact (never tagged plain :<tag>)
+                      echo "Artifact -> ${art_ns}/${name}:${TAG}-artifact"
+                      ( cd kb.db.cached && oras push "${art_ns}/${name}:${TAG}-artifact" \
+                          --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
+                          "${name}:application/vnd.sqlite3" )
+
+                      # 2) container image: :<tag>-image + :<tag> (+ :latest on GA)
+                      img="${img_ns}/${name}"
+                      tags=( -t "${img}:${TAG}-image" -t "${img}:${TAG}" )
+                      if [ "${final}" = true ]; then tags+=( -t "${img}:latest" ); fi
+                      echo "Image -> ${img}:${TAG}-image, :${TAG} (latest=${final})"
+                      docker build --build-arg DB="${name}" -f docker/Dockerfile "${tags[@]}" kb.db.cached
+                      docker push "${img}:${TAG}-image"
+                      docker push "${img}:${TAG}"
+                      if [ "${final}" = true ]; then docker push "${img}:latest"; fi
+                  done
+
     # -------------------------------------------------------------------------
     # RPM packaging
     # -------------------------------------------------------------------------
@@ -742,12 +831,26 @@ jobs:
                   os_version="${IMAGE##*:}"
                   echo "os_version=${os_version}" >> "$GITHUB_OUTPUT"
 
-            - name: Download validated kb.db
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: pkg/kb.db.cached/
+            - name: Pull validated kb.db from S3 backup bucket
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.validate-kb-db.outputs.kb-timestamp }}
+              run: |
+                  set -euo pipefail
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
+                  mkdir -p pkg/kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "pkg/kb.db.cached/${name}" --only-show-errors
+                  done
+                  # RELEASE_TAG carries KB build provenance for the package changelog.
+                  echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
+                  ls -lh pkg/kb.db.cached/
 
             - name: Checkout pgEdge action repos
               env:
@@ -933,12 +1036,26 @@ jobs:
                   distro="${IMAGE##*:}"
                   echo "distro=${distro}" >> "$GITHUB_OUTPUT"
 
-            - name: Download validated kb.db
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              with:
-                  pattern: kb-db-*
-                  merge-multiple: true
-                  path: pkg/kb.db.cached/
+            - name: Pull validated kb.db from S3 backup bucket
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.validate-kb-db.outputs.kb-timestamp }}
+              run: |
+                  set -euo pipefail
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
+                  mkdir -p pkg/kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "pkg/kb.db.cached/${name}" --only-show-errors
+                  done
+                  # RELEASE_TAG carries KB build provenance for the package changelog.
+                  echo "${KB_TAG}" > pkg/kb.db.cached/RELEASE_TAG
+                  ls -lh pkg/kb.db.cached/
 
             - name: Checkout pgEdge action repos
               env:

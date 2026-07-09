@@ -1,0 +1,30 @@
+name: setup-oras
+description: >
+    Install the oras CLI on the runner (macOS or Linux) without depending on
+    a third-party action. Skips installation if oras is already on PATH.
+
+runs:
+    using: composite
+    steps:
+        - name: Install oras
+          shell: bash
+          run: |
+              set -euo pipefail
+              if command -v oras >/dev/null 2>&1; then
+                  echo "oras already present: $(oras version | head -1)"
+                  exit 0
+              fi
+              version="1.2.0"
+              case "$(uname -m)" in
+                  x86_64|amd64)  arch=amd64 ;;
+                  arm64|aarch64) arch=arm64 ;;
+                  *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
+              esac
+              os="$(uname -s | tr 'A-Z' 'a-z')"
+              url="https://github.com/oras-project/oras/releases/download/v${version}/oras_${version}_${os}_${arch}.tar.gz"
+              echo "Downloading oras from ${url}"
+              curl -fsSL -o "${RUNNER_TEMP}/oras.tar.gz" "${url}"
+              mkdir -p "${HOME}/.local/bin"
+              tar -xzf "${RUNNER_TEMP}/oras.tar.gz" -C "${HOME}/.local/bin" oras
+              echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+              "${HOME}/.local/bin/oras" version | head -1
