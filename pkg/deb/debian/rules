@@ -39,8 +39,8 @@ override_dh_auto_install:
 
 	# --- SBOM install (distinct filename per package) ---
 	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json \
-		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge-ai-kb-@PKG_SUFFIX@/sboms/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json
 	install -D -m 644 debian/tmp/sbom/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json.asc \
-		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json.asc
+		debian/pgedge-ai-kb-@PKG_SUFFIX@/usr/share/pgedge-ai-kb-@PKG_SUFFIX@/sboms/pgedge-ai-kb-@PKG_SUFFIX@-sbom.json.asc
 
 	rm -rf debian/tmp/sbom

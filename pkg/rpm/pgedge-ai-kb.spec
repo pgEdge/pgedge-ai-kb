@@ -62,7 +62,6 @@ gpg --armor --detach-sign --default-key "$KEY_ID" \
 
 %install
 install -d %{buildroot}%{_datadir}/pgedge/pgedge-ai-kb
-install -d %{buildroot}%{_datadir}
 install -d %{buildroot}%{_defaultdocdir}/%{pname}
 
 install -m 644 %{SOURCE0} \
@@ -85,18 +84,20 @@ REPO_TYPE=${REPO_TYPE:-unknown}
 EOF
 
 # SBOM
-install -p -m 644 %{_builddir}/%{pname}-sbom.json \
-    %{buildroot}%{_datadir}/%{pname}-sbom.json
-install -p -m 644 %{_builddir}/%{pname}-sbom.json.asc \
-    %{buildroot}%{_datadir}/%{pname}-sbom.json.asc
+install -Dp -m 644 %{_builddir}/%{pname}-sbom.json \
+    %{buildroot}%{_datadir}/%{pname}/sboms/%{pname}-sbom.json
+install -Dp -m 644 %{_builddir}/%{pname}-sbom.json.asc \
+    %{buildroot}%{_datadir}/%{pname}/sboms/%{pname}-sbom.json.asc
 
 %files
 %license %{_defaultdocdir}/%{pname}/LICENSE.md
 %doc %{_defaultdocdir}/%{pname}/README.md
 %doc %{_defaultdocdir}/%{pname}/VERSION
 %{_datadir}/pgedge/pgedge-ai-kb/%{db_filename}
-%{_datadir}/%{pname}-sbom.json
-%{_datadir}/%{pname}-sbom.json.asc
+%dir %{_datadir}/%{pname}
+%dir %{_datadir}/%{pname}/sboms
+%{_datadir}/%{pname}/sboms/%{pname}-sbom.json
+%{_datadir}/%{pname}/sboms/%{pname}-sbom.json.asc
 
 %clean
 rm -rf %{buildroot}
