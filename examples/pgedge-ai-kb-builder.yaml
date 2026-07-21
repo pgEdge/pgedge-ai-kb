@@ -252,6 +252,12 @@ sources:
       project_version: "0.1.0"
 
     - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v2.1.0"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "2.1.0"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
       tag: "v2.0.0"
       doc_path: "docs"
       project_name: "pgEdge ACE"
