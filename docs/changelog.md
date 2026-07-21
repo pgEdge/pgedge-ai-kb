@@ -42,8 +42,13 @@
   first open via an idempotent `ALTER TABLE`. Old rows have NULL in
   this column until the next build runs with Gemini enabled.
 
-- The minimum required Go toolchain has bumped to 1.26.1 to match
-  the shared LLM library.
+- The minimum required Go toolchain has bumped to 1.26.5; this
+  matches the shared LLM library and patches known standard library
+  CVEs.
+
+- Vulnerable dependencies have been updated to patched releases;
+  `golang.org/x/net` moves to 0.55.0, and the documentation tooling
+  updates `pymdown-extensions`, `urllib3`, and `idna`.
 
 - The pgEdge AI Knowledgebase Builder is extracted from the pgEdge
   Postgres MCP Server into a standalone project. The Go module is
