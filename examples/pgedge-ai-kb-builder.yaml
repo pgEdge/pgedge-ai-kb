@@ -81,6 +81,18 @@ sources:
       project_version: "4.1.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgis364"
+      doc_path: "docs"
+      project_name: "PostGIS"
+      project_version: "3.6.4"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgis357"
+      doc_path: "docs"
+      project_name: "PostGIS"
+      project_version: "3.5.7"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "supautils322"
       doc_path: "docs"
       project_name: "supautils"
