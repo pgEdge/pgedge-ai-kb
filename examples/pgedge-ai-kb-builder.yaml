@@ -39,6 +39,12 @@ sources:
       project_version: "14"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgresql19beta2"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "19beta2"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgadmin913"
       doc_path: "docs"
       project_name: "pgAdmin 4"
@@ -103,6 +109,18 @@ sources:
       doc_path: "docs"
       project_name: "CloudNativePG"
       project_version: "1.30"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgvector085"
+      doc_path: "docs"
+      project_name: "pgvector"
+      project_version: "0.8.5"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgvector082"
+      doc_path: "docs"
+      project_name: "pgvector"
+      project_version: "0.8.2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "vchordbm25030"
@@ -174,6 +192,12 @@ sources:
       project_version: "6.0.0-beta.1"
 
     - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.11"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.11"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
       tag: "v5.0.10"
       doc_path: "docs"
       project_name: "Spock"
@@ -240,6 +264,12 @@ sources:
       project_version: "0.6.1"
 
     - git_url: "https://github.com/pgEdge/snowflake.git"
+      tag: "v2.6.0"
+      doc_path: "docs"
+      project_name: "pgEdge Snowflake"
+      project_version: "2.6.0"
+
+    - git_url: "https://github.com/pgEdge/snowflake.git"
       tag: "v2.5.0"
       doc_path: "docs"
       project_name: "pgEdge Snowflake"
@@ -262,6 +292,12 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge Helm"
       project_version: "0.1.0"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v2.1.1"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "2.1.1"
 
     - git_url: "https://github.com/pgEdge/ace.git"
       tag: "v2.1.0"
