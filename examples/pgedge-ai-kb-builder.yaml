@@ -9,40 +9,34 @@ doc_source_path: "bin/doc-source"
 # Documentation sources
 sources:
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_18_4"
+      tag: "REL_19_BETA3"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "19beta3"
+
+    - git_url: "https://github.com/postgres/postgres.git"
+      tag: "REL_18_6"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "18"
 
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_17_10"
+      tag: "REL_17_11"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "17"
 
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_16_14"
+      tag: "REL_16_15"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "16"
 
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_15_18"
+      tag: "REL_15_19"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "15"
-
-    - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_14_23"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "14"
-
-    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "postgresql19beta2"
-      doc_path: "docs"
-      project_name: "PostgreSQL"
-      project_version: "19beta2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgadmin913"
@@ -103,6 +97,12 @@ sources:
       doc_path: "docs"
       project_name: "supautils"
       project_version: "3.2.2"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbackrest259"
+      doc_path: "docs"
+      project_name: "pgBackRest"
+      project_version: "2.59.0"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "cnpg130"
@@ -472,6 +472,12 @@ sources:
       doc_path: "docs"
       project_name: "PostgREST"
       project_version: "14.5"
+
+    - git_url: "https://github.com/pgEdge/radar.git"
+      tag: "v0.5.1"
+      doc_path: "docs"
+      project_name: "pgEdge Radar"
+      project_version: "0.5.1"
 
     - git_url: "https://github.com/pgEdge/radar.git"
       tag: "v0.4.1"
