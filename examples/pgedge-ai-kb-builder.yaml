@@ -542,6 +542,14 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge ColdFront"
       project_version: "1.0.0-beta1"
+
+
+    # pgEdge Safe Session — added by auto/sync-kb-builder
+    - git_url: "https://github.com/pgEdge/pgedge-safesession.git"
+      tag: "v1.0"
+      doc_path: "docs"
+      project_name: "pgEdge Safe Session"
+      project_version: "1.0"
 embeddings:
     # Request timeouts shared by every provider. request_timeout is the
     # overall ceiling for one embedding request including all retries;
