@@ -45,6 +45,12 @@ sources:
       project_name: "PostgreSQL"
       project_version: "14"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit19beta3"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "19beta3"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgadmin913"
       doc_path: "docs"
       project_name: "pgAdmin 4"
@@ -175,6 +181,12 @@ sources:
       project_name: "pgEdge Enterprise"
 
     - git_url: "https://github.com/pgEdge/pgedge-postgres-mcp.git"
+      tag: "v1.1.0"
+      doc_path: "docs"
+      project_name: "pgEdge Postgres MCP"
+      project_version: "1.1.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-postgres-mcp.git"
       tag: "v1.0.0"
       doc_path: "docs"
       project_name: "pgEdge Postgres MCP"
@@ -196,6 +208,12 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge Docloader"
       project_version: "1.0.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-rag-server.git"
+      tag: "v2.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge RAG Server"
+      project_version: "2.0.0"
 
     - git_url: "https://github.com/pgEdge/pgedge-rag-server.git"
       tag: "v1.0.0"
@@ -502,6 +520,12 @@ sources:
       doc_path: "docs"
       project_name: "PostgREST"
       project_version: "14.5"
+
+    - git_url: "https://github.com/pgEdge/radar.git"
+      tag: "v0.6.2"
+      doc_path: "docs"
+      project_name: "pgEdge Radar"
+      project_version: "0.6.2"
 
     - git_url: "https://github.com/pgEdge/radar.git"
       tag: "v0.5.1"
