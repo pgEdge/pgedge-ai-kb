@@ -592,6 +592,14 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge Safe Session"
       project_version: "1.0"
+
+
+    # pgVolvra — added by auto/sync-kb-builder
+    - git_url: "https://github.com/pgEdge/pgvolvra.git"
+      tag: "v1.0.0-beta1"
+      doc_path: "docs"
+      project_name: "pgVolvra"
+      project_version: "1.0.0-beta1"
 embeddings:
     # Request timeouts shared by every provider. request_timeout is the
     # overall ceiling for one embedding request including all retries;
