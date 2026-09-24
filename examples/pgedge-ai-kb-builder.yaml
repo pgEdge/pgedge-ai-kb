@@ -9,30 +9,6 @@ doc_source_path: "bin/doc-source"
 # Documentation sources
 sources:
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_19_BETA3"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "19beta3"
-
-    - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_18_6"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "18"
-
-    - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_17_11"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "17"
-
-    - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_16_15"
-      doc_path: "doc/src/sgml"
-      project_name: "PostgreSQL"
-      project_version: "16"
-
-    - git_url: "https://github.com/postgres/postgres.git"
       tag: "REL_15_19"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
@@ -45,10 +21,34 @@ sources:
       project_name: "PostgreSQL"
       project_version: "14"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "postgresql19beta4"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "19beta4"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgaudit19beta3"
       doc_path: "docs"
       project_name: "pgAudit"
       project_version: "19beta3"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pg18"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "18"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pg17"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "17"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pg16"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "16"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "postgrest1418"
@@ -163,6 +163,12 @@ sources:
       doc_path: "docs"
       project_name: "pg_cron"
       project_version: "1.6.8"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgvectorize0271"
+      doc_path: "docs"
+      project_name: "pg_vectorize"
+      project_version: "0.27.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgvector085"
