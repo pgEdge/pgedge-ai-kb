@@ -538,3 +538,29 @@ func TestSplitHTMLTableAtRows_HeaderRowWithoutThead(t *testing.T) {
 		t.Errorf("chunks contain %d body rows, want 300", rows)
 	}
 }
+
+func TestSplitHTMLTableAtRows_OversizedHeaderRowKept(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	var b strings.Builder
+	b.WriteString("<table>\n<tr>")
+	for i := 0; i < 200; i++ {
+		b.WriteString("<th>column_heading</th>")
+	}
+	b.WriteString("</tr>\n")
+	for i := 0; i < 100; i++ {
+		b.WriteString("<tr><td>setting_name</td><td>some_value</td></tr>\n")
+	}
+	b.WriteString("</table>")
+
+	chunks := splitHTMLTableAtRows(b.String(), cfg)
+	all := ""
+	for _, ch := range chunks {
+		all += ch.Text + "\n"
+	}
+	if got := strings.Count(all, "<th>column_heading</th>"); got != 200 {
+		t.Errorf("output contains %d header cells, want 200 (header row lost)", got)
+	}
+	if got := strings.Count(all, "<td>setting_name</td>"); got != 100 {
+		t.Errorf("output contains %d body rows, want 100", got)
+	}
+}

@@ -450,15 +450,21 @@ func splitHTMLTableAtRows(content string, cfg ChunkConfig) []RawChunk {
 	footer := content[bodyEnd:]
 	// Without a <thead>, treat a leading row of only <th> cells as the
 	// column header so it repeats in every chunk
+	headerRow := ""
 	if !hasThead && len(rows) > 1 && htmlHeaderCell.MatchString(rows[0]) &&
 		!htmlDataCell.MatchString(rows[0]) {
-		header += rows[0] + "\n"
+		headerRow = rows[0]
+		header += headerRow + "\n"
 		rows = rows[1:]
 	}
-	// Drop the repeated wrapper if it would leave no room for rows
+	// Drop the repeated wrapper if it would leave no room for rows,
+	// keeping a promoted header row as ordinary content so it is not lost
 	if len(header)+len(footer) > cfg.MaxChars/2 ||
 		wordCount(header)+wordCount(footer) > cfg.MaxSize/2 {
 		header, footer = "", ""
+		if headerRow != "" {
+			rows = append([]string{headerRow}, rows...)
+		}
 	}
 
 	var chunks []RawChunk
