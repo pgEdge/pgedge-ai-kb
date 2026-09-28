@@ -13,6 +13,7 @@ package kbchunker
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pgEdge/pgedge-ai-kb/internal/kbtypes"
 )
@@ -502,5 +503,81 @@ func TestChunkDocument_ElementTypesTracked(t *testing.T) {
 
 	if !foundElementTypes {
 		t.Error("Expected element types to be tracked in chunks")
+	}
+}
+
+// TestChunkDocument_LargeHTMLTable reproduces the PostgreSQL error codes
+// appendix from the 3rd-party-docs Markdown: a large HTML table with no
+// blank lines, which previously became a single ~26 KB chunk that OpenAI
+// rejected for exceeding its 8192-token input limit.
+func TestChunkDocument_LargeHTMLTable(t *testing.T) {
+	doc := &kbtypes.Document{
+		Title: "PostgreSQL Error Codes",
+		Content: "# PostgreSQL Error Codes\n\nAll messages are assigned error codes.\n\n" +
+			"**Table: PostgreSQL Error Codes**\n\n" + buildHTMLTable(400),
+		ProjectName:    "PostgreSQL",
+		ProjectVersion: "19beta4",
+	}
+
+	chunks, err := ChunkDocument(doc)
+	if err != nil {
+		t.Fatalf("ChunkDocument() error = %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected the table to be split, got %d chunk(s)", len(chunks))
+	}
+
+	// Heading context is prepended after the size limits are applied
+	limit := MaxChunkChars + len("PostgreSQL Error Codes\n\n")
+	tableChunks := 0
+	for i, ch := range chunks {
+		if len(ch.Text) > limit {
+			t.Errorf("chunk %d has %d chars, exceeds %d", i, len(ch.Text), limit)
+		}
+		if strings.Contains(ch.Text, "<table>") {
+			tableChunks++
+		}
+	}
+	if tableChunks < 2 {
+		t.Errorf("expected the table split across chunks, got %d table chunk(s)", tableChunks)
+	}
+}
+
+func TestTruncateHeadingContext(t *testing.T) {
+	if got := truncateHeadingContext("Short Heading"); got != "Short Heading" {
+		t.Errorf("short heading changed: %q", got)
+	}
+
+	long := "HELP " + strings.Repeat("métric ", 200)
+	got := truncateHeadingContext(long)
+	if len(got) > MaxHeadingContextChars {
+		t.Errorf("truncated heading has %d bytes, want <= %d", len(got), MaxHeadingContextChars)
+	}
+	if !strings.HasSuffix(got, "...") || !strings.HasPrefix(got, "HELP ") {
+		t.Errorf("truncated heading = %q, want prefix kept and ellipsis", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated heading is not valid UTF-8: %q", got)
+	}
+}
+
+// TestChunkDocument_LongHeading covers a malformed document where a long
+// line of command output starts with "# " and is parsed as a heading.
+func TestChunkDocument_LongHeading(t *testing.T) {
+	heading := "# HELP patroni_version " + strings.Repeat("metric{a=\"b\"} 1 ", 300)
+	doc := &kbtypes.Document{
+		Title:   "REST API",
+		Content: heading + "\n\n" + strings.Repeat("Some body text here. ", 400),
+	}
+
+	chunks, err := ChunkDocument(doc)
+	if err != nil {
+		t.Fatalf("ChunkDocument() error = %v", err)
+	}
+	limit := MaxChunkChars + MaxHeadingContextChars + 2
+	for i, ch := range chunks {
+		if len(ch.Text) > limit {
+			t.Errorf("chunk %d has %d chars, exceeds %d", i, len(ch.Text), limit)
+		}
 	}
 }

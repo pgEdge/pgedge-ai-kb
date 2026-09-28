@@ -141,12 +141,12 @@ preservation. The package files split the work as follows:
   heading-hierarchy tracking.
 
 - The `elements.go` file detects structural elements (code blocks,
-  tables, lists, blockquotes, paragraphs).
+  Markdown and HTML tables, lists, blockquotes, paragraphs).
 
 - The `merge.go` file implements the second pass that merges
-  undersized chunks.
+  undersized chunks and the final pass that enforces the hard limits.
 
-The chunking algorithm uses a two-pass approach.
+The chunking algorithm uses two passes followed by a hard-limit check.
 
 #### Pass 1 — Semantic Boundary Splitting
 
@@ -162,9 +162,11 @@ structural element boundaries:
 
 4. The chunker uses type-specific splitters for oversized elements:
    paragraphs split at sentence boundaries, code blocks split at line
-   boundaries (re-adding fence markers), tables split at row
-   boundaries (preserving the header), lists split at top-level item
-   boundaries, and blockquotes split at line boundaries.
+   boundaries (re-adding fence markers), Markdown tables split at row
+   boundaries (preserving the header), HTML tables split at `<tr>`
+   boundaries (repeating the `<table>` and `<thead>` markup), lists
+   split at top-level item boundaries, and blockquotes split at line
+   boundaries.
 
 #### Pass 2 — Merge Undersized Chunks
 
@@ -179,6 +181,22 @@ fragments that hurt retrieval quality:
 3. The pass prefers forward merging for reading-flow continuity and
    handles trailing undersized chunks by merging backwards.
 
+#### Hard Limit Enforcement
+
+A final pass re-splits any chunk that still exceeds the hard limits.
+The type-specific splitters cannot divide content without natural
+boundaries, such as a paragraph with no sentence punctuation or a
+single very long line. The pass splits such chunks at line
+boundaries, then at word boundaries, and finally inside any word
+longer than the character limit. Embedding providers reject inputs
+over their token limit, so this pass guarantees that every chunk
+stays within bounds.
+
+The chunker prepends the heading path to each chunk after this pass;
+`MaxHeadingContextChars` caps that prefix. The cap protects against
+malformed documents where a long line starting with `#` is parsed as
+a heading and would otherwise repeat on every chunk in the section.
+
 #### Size Constraints
 
 The chunker enforces the following limits:
@@ -187,6 +205,7 @@ The chunker enforces the following limits:
 TargetChunkSize = 250  // Target words per chunk
 MaxChunkSize    = 300  // Hard word limit
 MaxChunkChars   = 3000 // Hard character limit
+MaxHeadingContextChars = 200 // Heading prefix cap
 MinSize         = 100  // Minimum before merging
 OverlapSize     = 50   // Overlap between chunks
 ```
@@ -393,6 +412,7 @@ const (
     MaxChunkSize    = 300
     MaxChunkChars   = 3000
     OverlapSize     = 50
+    MaxHeadingContextChars = 200
 )
 ```
 

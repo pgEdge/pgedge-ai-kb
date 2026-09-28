@@ -23,7 +23,7 @@ const (
 	Paragraph ElementType = iota
 	// CodeBlock is a fenced or indented code block
 	CodeBlock
-	// Table is a markdown table with | delimiters
+	// Table is a markdown table with | delimiters or an HTML <table> block
 	Table
 	// List is an ordered or unordered list
 	List
@@ -63,6 +63,8 @@ var (
 	tableSeparatorRegex = regexp.MustCompile(`^\s*\|[-:| ]+\|`)
 	listItemRegex       = regexp.MustCompile(`^(\s*)([-*+]|\d+\.)\s+`)
 	blockquoteRegex     = regexp.MustCompile(`^\s*>\s*`)
+	htmlTableOpenRegex  = regexp.MustCompile(`(?i)^\s*<table(\s|>|$)`)
+	htmlTableCloseRegex = regexp.MustCompile(`(?i)</table\s*>`)
 )
 
 // parseStructuralElements identifies structural units in markdown content.
@@ -88,6 +90,14 @@ func parseStructuralElements(content string) []StructuralElement {
 			if element.Content != "" {
 				elements = append(elements, element)
 			}
+			i = endIdx + 1
+			continue
+		}
+
+		// HTML table (<table> ... </table>)
+		if htmlTableOpenRegex.MatchString(line) {
+			element, endIdx := parseHTMLTable(lines, i)
+			elements = append(elements, element)
 			i = endIdx + 1
 			continue
 		}
@@ -185,6 +195,26 @@ func parseTable(lines []string, i int) (StructuralElement, int) {
 	return StructuralElement{
 		Type:    Table,
 		Content: strings.TrimRight(content.String(), "\n"),
+	}, endIdx
+}
+
+// parseHTMLTable extracts an HTML table starting at index i. The table
+// ends at the first line containing </table>, or at the end of the content
+// if the closing tag is missing. Nested tables are not tracked; they are
+// rare in documentation and the size limits still apply to the result.
+// Returns the element and the index of the last line of the table.
+func parseHTMLTable(lines []string, i int) (StructuralElement, int) {
+	endIdx := len(lines) - 1
+	for j := i; j < len(lines); j++ {
+		if htmlTableCloseRegex.MatchString(lines[j]) {
+			endIdx = j
+			break
+		}
+	}
+
+	return StructuralElement{
+		Type:    Table,
+		Content: strings.TrimRight(strings.Join(lines[i:endIdx+1], "\n"), "\n"),
 	}, endIdx
 }
 
@@ -307,6 +337,7 @@ func parseParagraph(lines []string, i int) (StructuralElement, int) {
 		// Check if this line starts a new structural element
 		if codeBlockFenceRegex.MatchString(line) ||
 			tableRowRegex.MatchString(line) ||
+			htmlTableOpenRegex.MatchString(line) ||
 			listItemRegex.MatchString(line) ||
 			blockquoteRegex.MatchString(line) {
 			break

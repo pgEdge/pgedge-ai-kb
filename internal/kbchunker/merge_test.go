@@ -13,6 +13,7 @@ package kbchunker
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestDefaultChunkConfig(t *testing.T) {
@@ -356,5 +357,156 @@ func TestSplitListAtItems(t *testing.T) {
 		if len(chunk.ElementTypes) == 0 || chunk.ElementTypes[0] != "list" {
 			t.Errorf("chunk %d should be a list", i)
 		}
+	}
+}
+
+// buildHTMLTable returns an HTML table with a header and n body rows in
+// the multi-line style produced by the 3rd-party-docs converter.
+func buildHTMLTable(n int) string {
+	var b strings.Builder
+	b.WriteString("<table>\n<thead>\n<tr>\n<th>Error Code</th>\n")
+	b.WriteString("<th>Condition Name</th>\n</tr>\n</thead>\n<tbody>\n")
+	for i := 0; i < n; i++ {
+		b.WriteString("<tr>\n<td><code>")
+		b.WriteString(strings.Repeat("X", 5))
+		b.WriteString("</code></td>\n<td><code>condition_name_")
+		b.WriteString(strings.Repeat("y", i%20))
+		b.WriteString("</code></td>\n</tr>\n")
+	}
+	b.WriteString("</tbody>\n</table>")
+	return b.String()
+}
+
+func TestSplitHTMLTableAtRows(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	table := buildHTMLTable(400)
+
+	chunks := splitHTMLTableAtRows(table, cfg)
+	if len(chunks) < 2 {
+		t.Fatalf("expected table to be split, got %d chunk(s)", len(chunks))
+	}
+
+	rows := 0
+	for i, ch := range chunks {
+		if len(ch.Text) > cfg.MaxChars {
+			t.Errorf("chunk %d has %d chars, exceeds %d", i, len(ch.Text), cfg.MaxChars)
+		}
+		if !strings.HasPrefix(ch.Text, "<table>\n<thead>") {
+			t.Errorf("chunk %d does not repeat the table header", i)
+		}
+		if !strings.HasSuffix(ch.Text, "</tbody>\n</table>") {
+			t.Errorf("chunk %d does not repeat the table footer", i)
+		}
+		if ch.ElementTypes[0] != "table" {
+			t.Errorf("chunk %d element type = %v, want table", i, ch.ElementTypes)
+		}
+		// One <tr> per chunk belongs to the repeated header
+		rows += strings.Count(ch.Text, "<tr>") - 1
+	}
+	if rows != 400 {
+		t.Errorf("chunks contain %d body rows, want 400", rows)
+	}
+}
+
+func TestSplitHTMLTableAtRows_SingleLine(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	var b strings.Builder
+	b.WriteString("<table><tr><th>h</th></tr>")
+	for i := 0; i < 500; i++ {
+		b.WriteString("<tr><td>value</td><td>another_value</td></tr>")
+	}
+	b.WriteString("</table>")
+
+	chunks := splitHTMLTableAtRows(b.String(), cfg)
+	if len(chunks) < 2 {
+		t.Fatalf("expected table to be split, got %d chunk(s)", len(chunks))
+	}
+	for i, ch := range chunks {
+		if !withinLimits(ch.Text, cfg) {
+			t.Errorf("chunk %d exceeds limits: %d chars", i, len(ch.Text))
+		}
+		if !strings.HasSuffix(ch.Text, "</table>") {
+			t.Errorf("chunk %d does not end with </table>", i)
+		}
+	}
+}
+
+func TestSplitHTMLTableAtRows_NoRows(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	table := "<table>" + strings.Repeat("text ", 1000) + "</table>"
+
+	chunks := splitHTMLTableAtRows(table, cfg)
+	if len(chunks) < 2 {
+		t.Fatalf("expected fallback split, got %d chunk(s)", len(chunks))
+	}
+	for i, ch := range chunks {
+		if !withinLimits(ch.Text, cfg) {
+			t.Errorf("chunk %d exceeds limits: %d chars", i, len(ch.Text))
+		}
+	}
+}
+
+func TestEnforceHardLimits_LeavesSmallChunksAlone(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	in := []RawChunk{{Text: "short text", ElementTypes: []string{"paragraph"}}}
+
+	out := enforceHardLimits(in, cfg)
+	if len(out) != 1 || out[0].Text != "short text" {
+		t.Errorf("enforceHardLimits changed a small chunk: %+v", out)
+	}
+}
+
+func TestEnforceHardLimits_SplitsOversizedChunks(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"no sentence punctuation", strings.Repeat("<td>x</td>\n", 2000)},
+		{"single long line", strings.Repeat("word ", 2000)},
+		{"single long token", strings.Repeat("A", 10000)},
+		{"multibyte token", strings.Repeat("é", 5000)},
+		{"too many words", strings.Repeat("a\n", 1000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := []RawChunk{{Text: tt.text, ElementTypes: []string{"paragraph"}}}
+			out := enforceHardLimits(in, cfg)
+			if len(out) < 2 {
+				t.Fatalf("expected a split, got %d chunk(s)", len(out))
+			}
+			total := 0
+			for i, ch := range out {
+				if !withinLimits(ch.Text, cfg) {
+					t.Errorf("chunk %d exceeds limits: %d chars, %d words",
+						i, len(ch.Text), wordCount(ch.Text))
+				}
+				if !utf8.ValidString(ch.Text) {
+					t.Errorf("chunk %d is not valid UTF-8", i)
+				}
+				if ch.ElementTypes[0] != "paragraph" {
+					t.Errorf("chunk %d lost its element type", i)
+				}
+				total += len(strings.Join(strings.Fields(ch.Text), ""))
+			}
+			if want := len(strings.Join(strings.Fields(tt.text), "")); total != want {
+				t.Errorf("split lost content: %d non-space bytes, want %d", total, want)
+			}
+		})
+	}
+}
+
+func TestSplitLongWord(t *testing.T) {
+	parts := splitLongWord(strings.Repeat("ab", 10), 7)
+	if strings.Join(parts, "") != strings.Repeat("ab", 10) {
+		t.Errorf("parts do not reassemble the word: %v", parts)
+	}
+	for _, p := range parts {
+		if len(p) > 7 {
+			t.Errorf("part %q exceeds 7 bytes", p)
+		}
+	}
+	if got := splitLongWord("short", 7); len(got) != 1 || got[0] != "short" {
+		t.Errorf("splitLongWord(short) = %v", got)
 	}
 }
