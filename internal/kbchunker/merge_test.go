@@ -510,3 +510,31 @@ func TestSplitLongWord(t *testing.T) {
 		t.Errorf("splitLongWord(short) = %v", got)
 	}
 }
+
+func TestSplitHTMLTableAtRows_HeaderRowWithoutThead(t *testing.T) {
+	cfg := DefaultChunkConfig()
+	var b strings.Builder
+	b.WriteString("<table>\n<tr><th>Name</th><th>Value</th></tr>\n")
+	for i := 0; i < 300; i++ {
+		b.WriteString("<tr><td>setting_name</td><td>some_value</td></tr>\n")
+	}
+	b.WriteString("</table>")
+
+	chunks := splitHTMLTableAtRows(b.String(), cfg)
+	if len(chunks) < 2 {
+		t.Fatalf("expected table to be split, got %d chunk(s)", len(chunks))
+	}
+	rows := 0
+	for i, ch := range chunks {
+		if !withinLimits(ch.Text, cfg) {
+			t.Errorf("chunk %d exceeds limits: %d chars", i, len(ch.Text))
+		}
+		if !strings.HasPrefix(ch.Text, "<table>\n<tr><th>Name</th><th>Value</th></tr>") {
+			t.Errorf("chunk %d does not repeat the <th> header row", i)
+		}
+		rows += strings.Count(ch.Text, "<td>setting_name</td>")
+	}
+	if rows != 300 {
+		t.Errorf("chunks contain %d body rows, want 300", rows)
+	}
+}

@@ -21,6 +21,8 @@ var (
 	htmlRowOpenRegex  = regexp.MustCompile(`(?i)<tr(\s|>)`)
 	htmlRowCloseRegex = regexp.MustCompile(`(?i)</tr\s*>`)
 	htmlTheadEndRegex = regexp.MustCompile(`(?i)</thead\s*>`)
+	htmlHeaderCell    = regexp.MustCompile(`(?i)<th(\s|>)`)
+	htmlDataCell      = regexp.MustCompile(`(?i)<td(\s|>)`)
 )
 
 // RawChunk is an intermediate chunk before final processing.
@@ -408,13 +410,16 @@ func splitTableAtRows(content string, cfg ChunkConfig) []RawChunk {
 }
 
 // splitHTMLTableAtRows splits an HTML table at <tr> boundaries. The
-// markup before the first body row (the <table> tag and any <thead>) is
-// repeated at the start of every chunk and the markup after the last row
-// is repeated at the end, so each chunk stays a self-describing table.
+// markup before the first body row (the <table> tag and any <thead>, or a
+// leading row of <th> cells when there is no <thead>) is repeated at the
+// start of every chunk and the markup after the last row is repeated at
+// the end, so each chunk stays a self-describing table.
 func splitHTMLTableAtRows(content string, cfg ChunkConfig) []RawChunk {
 	bodyStart := 0
+	hasThead := false
 	if loc := htmlTheadEndRegex.FindStringIndex(content); loc != nil {
 		bodyStart = loc[1]
+		hasThead = true
 	}
 	firstRow := htmlRowOpenRegex.FindStringIndex(content[bodyStart:])
 	rowEnds := htmlRowCloseRegex.FindAllStringIndex(content, -1)
@@ -425,14 +430,6 @@ func splitHTMLTableAtRows(content string, cfg ChunkConfig) []RawChunk {
 	bodyEnd := rowEnds[len(rowEnds)-1][1]
 	if bodyEnd <= bodyStart {
 		return splitAtWordBoundaries(content, "table", cfg)
-	}
-
-	header := content[:bodyStart]
-	footer := content[bodyEnd:]
-	// Drop the repeated wrapper if it would leave no room for rows
-	if len(header)+len(footer) > cfg.MaxChars/2 ||
-		wordCount(header)+wordCount(footer) > cfg.MaxSize/2 {
-		header, footer = "", ""
 	}
 
 	// Each row runs from one <tr> to the next
@@ -447,6 +444,21 @@ func splitHTMLTableAtRows(content string, cfg ChunkConfig) []RawChunk {
 		if row := strings.TrimSpace(body[loc[0]:end]); row != "" {
 			rows = append(rows, row)
 		}
+	}
+
+	header := content[:bodyStart]
+	footer := content[bodyEnd:]
+	// Without a <thead>, treat a leading row of only <th> cells as the
+	// column header so it repeats in every chunk
+	if !hasThead && len(rows) > 1 && htmlHeaderCell.MatchString(rows[0]) &&
+		!htmlDataCell.MatchString(rows[0]) {
+		header += rows[0] + "\n"
+		rows = rows[1:]
+	}
+	// Drop the repeated wrapper if it would leave no room for rows
+	if len(header)+len(footer) > cfg.MaxChars/2 ||
+		wordCount(header)+wordCount(footer) > cfg.MaxSize/2 {
+		header, footer = "", ""
 	}
 
 	var chunks []RawChunk
