@@ -11,7 +11,18 @@
 package kbchunker
 
 import (
+	"regexp"
 	"strings"
+	"unicode/utf8"
+)
+
+// Regular expressions for splitting HTML tables into rows
+var (
+	htmlRowOpenRegex  = regexp.MustCompile(`(?i)<tr(\s|>)`)
+	htmlRowCloseRegex = regexp.MustCompile(`(?i)</tr\s*>`)
+	htmlTheadEndRegex = regexp.MustCompile(`(?i)</thead\s*>`)
+	htmlHeaderCell    = regexp.MustCompile(`(?i)<th(\s|>)`)
+	htmlDataCell      = regexp.MustCompile(`(?i)<td(\s|>)`)
 )
 
 // RawChunk is an intermediate chunk before final processing.
@@ -201,6 +212,9 @@ func splitOversizedElement(elem StructuralElement, cfg ChunkConfig) []RawChunk {
 	case CodeBlock:
 		return splitCodeBlockAtLines(elem.Content, cfg)
 	case Table:
+		if htmlTableOpenRegex.MatchString(elem.Content) {
+			return splitHTMLTableAtRows(elem.Content, cfg)
+		}
 		return splitTableAtRows(elem.Content, cfg)
 	case List:
 		return splitListAtItems(elem.Content, cfg)
@@ -395,6 +409,92 @@ func splitTableAtRows(content string, cfg ChunkConfig) []RawChunk {
 	return chunks
 }
 
+// splitHTMLTableAtRows splits an HTML table at <tr> boundaries. The
+// markup before the first body row (the <table> tag and any <thead>, or a
+// leading row of <th> cells when there is no <thead>) is repeated at the
+// start of every chunk and the markup after the last row is repeated at
+// the end, so each chunk stays a self-describing table.
+func splitHTMLTableAtRows(content string, cfg ChunkConfig) []RawChunk {
+	bodyStart := 0
+	hasThead := false
+	if loc := htmlTheadEndRegex.FindStringIndex(content); loc != nil {
+		bodyStart = loc[1]
+		hasThead = true
+	}
+	firstRow := htmlRowOpenRegex.FindStringIndex(content[bodyStart:])
+	rowEnds := htmlRowCloseRegex.FindAllStringIndex(content, -1)
+	if firstRow == nil || len(rowEnds) == 0 {
+		return splitAtWordBoundaries(content, "table", cfg)
+	}
+	bodyStart += firstRow[0]
+	bodyEnd := rowEnds[len(rowEnds)-1][1]
+	if bodyEnd <= bodyStart {
+		return splitAtWordBoundaries(content, "table", cfg)
+	}
+
+	// Each row runs from one <tr> to the next
+	body := content[bodyStart:bodyEnd]
+	starts := htmlRowOpenRegex.FindAllStringIndex(body, -1)
+	rows := make([]string, 0, len(starts))
+	for k, loc := range starts {
+		end := len(body)
+		if k+1 < len(starts) {
+			end = starts[k+1][0]
+		}
+		if row := strings.TrimSpace(body[loc[0]:end]); row != "" {
+			rows = append(rows, row)
+		}
+	}
+
+	header := content[:bodyStart]
+	footer := content[bodyEnd:]
+	// Without a <thead>, treat a leading row of only <th> cells as the
+	// column header so it repeats in every chunk
+	headerRow := ""
+	if !hasThead && len(rows) > 1 && htmlHeaderCell.MatchString(rows[0]) &&
+		!htmlDataCell.MatchString(rows[0]) {
+		headerRow = rows[0]
+		header += headerRow + "\n"
+		rows = rows[1:]
+	}
+	// Drop the repeated wrapper if it would leave no room for rows,
+	// keeping a promoted header row as ordinary content so it is not lost
+	if len(header)+len(footer) > cfg.MaxChars/2 ||
+		wordCount(header)+wordCount(footer) > cfg.MaxSize/2 {
+		header, footer = "", ""
+		if headerRow != "" {
+			rows = append([]string{headerRow}, rows...)
+		}
+	}
+
+	var chunks []RawChunk
+	var currentRows []string
+	build := func(rs []string) string {
+		return strings.TrimSpace(header + strings.Join(rs, "\n") + footer)
+	}
+	for _, row := range rows {
+		candidate := build(append(currentRows, row))
+		fits := len(candidate) <= cfg.MaxChars &&
+			wordCount(candidate) <= cfg.MaxSize
+		if !fits && len(currentRows) > 0 {
+			chunks = append(chunks, RawChunk{
+				Text:         build(currentRows),
+				ElementTypes: []string{"table"},
+			})
+			currentRows = nil
+		}
+		currentRows = append(currentRows, row)
+	}
+	if len(currentRows) > 0 {
+		chunks = append(chunks, RawChunk{
+			Text:         build(currentRows),
+			ElementTypes: []string{"table"},
+		})
+	}
+
+	return chunks
+}
+
 // splitListAtItems splits a list at item boundaries.
 func splitListAtItems(content string, cfg ChunkConfig) []RawChunk {
 	lines := strings.Split(content, "\n")
@@ -506,6 +606,105 @@ func splitAtWordBoundaries(content, elementType string, cfg ChunkConfig) []RawCh
 	}
 
 	return chunks
+}
+
+// enforceHardLimits re-splits any chunk that still exceeds MaxChars or
+// MaxSize after the semantic and merge passes. The type-specific splitters
+// cannot divide content with no natural boundary (a paragraph with no
+// sentence punctuation, a single very long line), and embedding providers
+// reject inputs over their token limit, so this is the final guarantee.
+func enforceHardLimits(chunks []RawChunk, cfg ChunkConfig) []RawChunk {
+	var out []RawChunk
+	for _, ch := range chunks {
+		if withinLimits(ch.Text, cfg) {
+			out = append(out, ch)
+			continue
+		}
+		for _, text := range splitToLimits(ch.Text, cfg) {
+			out = append(out, RawChunk{
+				Text:         text,
+				ElementTypes: ch.ElementTypes,
+			})
+		}
+	}
+	return out
+}
+
+// withinLimits reports whether text satisfies both hard size limits.
+func withinLimits(text string, cfg ChunkConfig) bool {
+	return len(text) <= cfg.MaxChars && wordCount(text) <= cfg.MaxSize
+}
+
+// splitToLimits packs text into pieces that satisfy the hard limits,
+// breaking at line boundaries where possible, then at word boundaries,
+// and finally inside a word for tokens longer than MaxChars.
+func splitToLimits(text string, cfg ChunkConfig) []string {
+	var pieces []string
+	var current strings.Builder
+	currentWords := 0
+
+	flush := func() {
+		if s := strings.TrimSpace(current.String()); s != "" {
+			pieces = append(pieces, s)
+		}
+		current.Reset()
+		currentWords = 0
+	}
+	add := func(part, sep string) {
+		partWords := wordCount(part)
+		if current.Len() > 0 &&
+			(current.Len()+len(sep)+len(part) > cfg.MaxChars ||
+				currentWords+partWords > cfg.MaxSize) {
+			flush()
+		}
+		if current.Len() > 0 {
+			current.WriteString(sep)
+		}
+		current.WriteString(part)
+		currentWords += partWords
+	}
+
+	for _, line := range strings.Split(text, "\n") {
+		if withinLimits(line, cfg) {
+			add(line, "\n")
+			continue
+		}
+		// The line alone is too big: fall back to words
+		flush()
+		for _, word := range strings.Fields(line) {
+			for _, part := range splitLongWord(word, cfg.MaxChars) {
+				add(part, " ")
+			}
+		}
+		flush()
+	}
+	flush()
+
+	return pieces
+}
+
+// splitLongWord cuts a word longer than maxChars bytes into pieces of at
+// most maxChars bytes without breaking a UTF-8 sequence.
+func splitLongWord(word string, maxChars int) []string {
+	if len(word) <= maxChars {
+		return []string{word}
+	}
+	var parts []string
+	for len(word) > maxChars {
+		cut := maxChars
+		for cut > 0 && !utf8.RuneStart(word[cut]) {
+			cut--
+		}
+		if cut == 0 {
+			cut = maxChars
+		}
+		parts = append(parts, word[:cut])
+		word = word[cut:]
+	}
+	if word != "" {
+		parts = append(parts, word)
+	}
+	return parts
 }
 
 // wordCount returns the number of words in text.

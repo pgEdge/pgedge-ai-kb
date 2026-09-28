@@ -13,6 +13,7 @@ package kbchunker
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/pgEdge/pgedge-ai-kb/internal/kbtypes"
 )
@@ -33,6 +34,11 @@ const (
 	// (like XML/SGML with verbose technical terms). For 8192 token limit,
 	// assuming ~2 chars per token for technical content, 3000 chars is safe.
 	MaxChunkChars = 3000
+	// MaxHeadingContextChars caps the heading path prepended to each chunk.
+	// Malformed source documents can turn a long line into a heading (for
+	// example, "# HELP ..." metrics output outside a code fence), which
+	// would otherwise be repeated in full on every chunk of the section.
+	MaxHeadingContextChars = 200
 )
 
 // ChunkDocument breaks a document into chunks with overlap
@@ -139,6 +145,7 @@ func parseMarkdownSections(markdown string) []Section {
 // chunkSection breaks a section into chunks using a hybrid two-pass algorithm.
 // Pass 1: Split at semantic boundaries (code blocks, tables, lists stay intact)
 // Pass 2: Merge undersized chunks to improve embedding quality
+// A final pass then re-splits anything still over the hard size limits.
 func chunkSection(section Section, doc *kbtypes.Document) []*kbtypes.Chunk {
 	content := strings.TrimSpace(section.Content)
 
@@ -163,6 +170,9 @@ func chunkSection(section Section, doc *kbtypes.Document) []*kbtypes.Chunk {
 	// Pass 2: Merge undersized chunks
 	mergedChunks := mergeUndersizedChunks(rawChunks, cfg.MinSize, cfg.MaxSize, cfg.MaxChars)
 
+	// Guarantee the hard limits for content with no natural split points
+	mergedChunks = enforceHardLimits(mergedChunks, cfg)
+
 	// Convert to final chunks with metadata
 	var chunks []*kbtypes.Chunk
 	for _, raw := range mergedChunks {
@@ -173,9 +183,9 @@ func chunkSection(section Section, doc *kbtypes.Document) []*kbtypes.Chunk {
 			// Use full heading path for better context if available
 			if len(section.HeadingPath) > 1 {
 				headingContext := strings.Join(section.HeadingPath, " > ")
-				text = headingContext + "\n\n" + text
+				text = truncateHeadingContext(headingContext) + "\n\n" + text
 			} else {
-				text = section.Heading + "\n\n" + text
+				text = truncateHeadingContext(section.Heading) + "\n\n" + text
 			}
 		}
 
@@ -197,6 +207,21 @@ func chunkSection(section Section, doc *kbtypes.Document) []*kbtypes.Chunk {
 	}
 
 	return chunks
+}
+
+// truncateHeadingContext shortens heading context to at most
+// MaxHeadingContextChars bytes, cutting at a UTF-8 boundary and marking
+// the cut with an ellipsis.
+func truncateHeadingContext(heading string) string {
+	if len(heading) <= MaxHeadingContextChars {
+		return heading
+	}
+	const ellipsis = "..."
+	cut := MaxHeadingContextChars - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(heading[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(heading[:cut]) + ellipsis
 }
 
 // tokenize splits text into tokens (simple whitespace tokenization)

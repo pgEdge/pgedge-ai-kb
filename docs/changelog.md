@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The chunker now guarantees its hard size limits for every chunk,
+  which fixes OpenAI builds failing with "maximum input length is
+  8192 tokens". The chunker now recognises HTML tables in Markdown
+  sources and splits them at row boundaries, repeating the table
+  header in each chunk. A final pass re-splits any chunk that still
+  exceeds the limits, such as text with no sentence punctuation or a
+  single very long line. The heading context prepended to each chunk
+  is now capped at 200 characters to handle malformed documents.
+
 - The builder now writes one database per enabled provider/model
   instead of a single combined `kb.db`, keeping each release asset and
   package under GitHub's 2 GiB limit. Each file is named

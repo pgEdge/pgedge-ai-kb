@@ -450,3 +450,43 @@ func truncate(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "..."
 }
+
+func TestParseStructuralElements_HTMLTable(t *testing.T) {
+	content := `Intro paragraph.
+<table>
+<tr>
+<td>a</td>
+</tr>
+</table>
+After the table.`
+
+	elements := parseStructuralElements(content)
+	if len(elements) != 3 {
+		t.Fatalf("expected 3 elements, got %d: %+v", len(elements), elements)
+	}
+	if elements[0].Type != Paragraph || elements[0].Content != "Intro paragraph." {
+		t.Errorf("element 0 = %+v, want intro paragraph", elements[0])
+	}
+	if elements[1].Type != Table {
+		t.Errorf("element 1 type = %v, want table", elements[1].Type)
+	}
+	if !strings.HasPrefix(elements[1].Content, "<table>") ||
+		!strings.HasSuffix(elements[1].Content, "</table>") {
+		t.Errorf("element 1 content = %q, want the full table", elements[1].Content)
+	}
+	if elements[2].Type != Paragraph || elements[2].Content != "After the table." {
+		t.Errorf("element 2 = %+v, want trailing paragraph", elements[2])
+	}
+}
+
+func TestParseStructuralElements_HTMLTableUnclosed(t *testing.T) {
+	content := "<TABLE class=\"x\">\n<tr><td>a</td></tr>\n<tr><td>b</td></tr>"
+
+	elements := parseStructuralElements(content)
+	if len(elements) != 1 || elements[0].Type != Table {
+		t.Fatalf("expected one table element, got %+v", elements)
+	}
+	if elements[0].Content != content {
+		t.Errorf("content = %q, want %q", elements[0].Content, content)
+	}
+}
