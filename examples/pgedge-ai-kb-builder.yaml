@@ -21,10 +21,10 @@ sources:
       project_name: "PostgreSQL"
       project_version: "14"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "postgresql19beta4"
+      branch: "postgresql19rc1"
       doc_path: "docs"
       project_name: "PostgreSQL"
-      project_version: "19beta4"
+      project_version: "19rc1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgaudit19beta3"
@@ -111,6 +111,12 @@ sources:
       project_version: "4.1.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "systemstats41"
+      doc_path: "docs"
+      project_name: "system_stats"
+      project_version: "4.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "postgis364"
       doc_path: "docs"
       project_name: "PostGIS"
@@ -157,6 +163,12 @@ sources:
       doc_path: "docs"
       project_name: "CloudNativePG"
       project_version: "1.30"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbouncer1261"
+      doc_path: "docs"
+      project_name: "PgBouncer"
+      project_version: "1.26.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgbouncer1260"
