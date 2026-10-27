@@ -8,7 +8,7 @@ database. The end-to-end run completes in a few minutes.
 
 The builder requires the following tools on your build machine:
 
-- Go 1.25 or later, with the `go` binary on `$PATH`.
+- Go 1.26.10 or later, with the `go` binary on `$PATH`.
 
 - Git, used for cloning documentation source repositories.
 
