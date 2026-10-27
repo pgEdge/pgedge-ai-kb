@@ -72,7 +72,7 @@ consumers load the database for their provider for semantic search.
 
 ### Prerequisites
 
-- Go 1.25 or higher
+- Go 1.26.10 or higher
 - golangci-lint v2.x (for linting)
 - Python 3.11+ (for documentation builds)
 

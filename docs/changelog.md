@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The builder now requires Go 1.26.10, which adds eight compromised
+  eMudhra intermediate CAs to the `crypto/x509` denylist
+  (CVE-2026-111943).
+
 - The chunker now guarantees its hard size limits for every chunk,
   which fixes OpenAI builds failing with "maximum input length is
   8192 tokens". The chunker now recognises HTML tables in Markdown
