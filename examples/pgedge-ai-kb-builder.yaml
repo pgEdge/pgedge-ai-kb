@@ -141,6 +141,12 @@ sources:
       project_version: "3.2.2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbackrest2600"
+      doc_path: "docs"
+      project_name: "pgBackRest"
+      project_version: "2.60.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgbackrest2593"
       doc_path: "docs"
       project_name: "pgBackRest"
@@ -444,6 +450,12 @@ sources:
       project_version: "0.1.0"
 
     - git_url: "https://github.com/pgEdge/ace.git"
+      tag: "v3.0.0"
+      doc_path: "docs"
+      project_name: "pgEdge ACE"
+      project_version: "3.0.0"
+
+    - git_url: "https://github.com/pgEdge/ace.git"
       tag: "v2.1.1"
       doc_path: "docs"
       project_name: "pgEdge ACE"
@@ -698,10 +710,10 @@ sources:
 
     # pgVolvra — added by auto/sync-kb-builder
     - git_url: "https://github.com/pgEdge/pgvolvra.git"
-      tag: "v1.0.0-beta2"
+      tag: "v1.0.0-beta3"
       doc_path: "docs"
       project_name: "pgVolvra"
-      project_version: "1.0.0-beta2"
+      project_version: "1.0.0-beta3"
 
 
     # pgEdge CLI — added by auto/sync-kb-builder
