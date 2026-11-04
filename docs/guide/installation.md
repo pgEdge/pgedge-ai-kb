@@ -10,7 +10,8 @@ The builder runs on Linux, macOS, and Windows. The build itself uses
 pure Go, so the host machine needs only the tools below; the resulting
 binary has no system dependencies at runtime:
 
-- Go 1.26.10 or later for source builds.
+- Go 1.26.10 or later on the 1.26 line, or Go 1.27.3 or later, for
+  source builds.
 
 - Git, for fetching documentation source repositories.
 
