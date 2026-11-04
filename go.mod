@@ -1,6 +1,6 @@
 module github.com/pgEdge/pgedge-ai-kb
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0

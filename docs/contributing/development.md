@@ -8,7 +8,8 @@ pgEdge AI Knowledgebase Builder.
 The builder uses pure Go and has no native dependencies. The
 development environment requires the following tools:
 
-- Go 1.25 or later, with `$GOPATH/bin` on your `$PATH`.
+- Go 1.26.10 or later on the 1.26 line, or Go 1.27.3 or later, with
+  `$GOPATH/bin` on your `$PATH`.
 
 - Git.
 
