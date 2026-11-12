@@ -8,29 +8,29 @@ doc_source_path: "bin/doc-source"
 
 # Documentation sources
 sources:
+
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_15_19"
+      tag: "REL_15_20"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "15"
 
-
     - git_url: "https://github.com/postgres/postgres.git"
-      tag: "REL_14_24"
+      tag: "REL_14_25"
       doc_path: "doc/src/sgml"
       project_name: "PostgreSQL"
       project_version: "14"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "postgresql19rc1"
+      branch: "postgresql19rc2"
       doc_path: "docs"
       project_name: "PostgreSQL"
-      project_version: "19rc1"
+      project_version: "19rc2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "pgaudit19beta3"
+      branch: "pgaudit19rc1"
       doc_path: "docs"
       project_name: "pgAudit"
-      project_version: "19beta3"
+      project_version: "19rc1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pg18"
@@ -55,6 +55,12 @@ sources:
       doc_path: "docs"
       project_name: "PostgREST"
       project_version: "14.18"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgadmin919"
+      doc_path: "docs"
+      project_name: "pgAdmin 4"
+      project_version: "9.19"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgadmin918"
@@ -115,6 +121,12 @@ sources:
       doc_path: "docs"
       project_name: "system_stats"
       project_version: "4.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "supautils400"
+      doc_path: "docs"
+      project_name: "supautils"
+      project_version: "4.0.0"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "postgis364"
@@ -183,6 +195,12 @@ sources:
       project_version: "1.26.0"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgmq1131"
+      doc_path: "docs"
+      project_name: "pgmq"
+      project_version: "1.13.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgmq1130"
       doc_path: "docs"
       project_name: "pgmq"
@@ -199,6 +217,12 @@ sources:
       doc_path: "docs"
       project_name: "pgmq"
       project_version: "1.11.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pldebugger110"
+      doc_path: "docs"
+      project_name: "pldebugger"
+      project_version: "1.10"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgcron168"
@@ -282,6 +306,12 @@ sources:
       project_name: "pgEdge AI Knowledgebase Builder"
 
     - git_url: "https://github.com/pgEdge/pgedge-anonymizer.git"
+      tag: "v1.0.1"
+      doc_path: "docs"
+      project_name: "pgEdge Anonymizer"
+      project_version: "1.0.1"
+
+    - git_url: "https://github.com/pgEdge/pgedge-anonymizer.git"
       tag: "v1.0.0"
       doc_path: "docs"
       project_name: "pgEdge Anonymizer"
@@ -292,6 +322,12 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge Docloader"
       project_version: "1.0.0"
+
+    - git_url: "https://github.com/pgEdge/pgedge-rag-server.git"
+      tag: "v2.0.1"
+      doc_path: "docs"
+      project_name: "pgEdge RAG Server"
+      project_version: "2.0.1"
 
     - git_url: "https://github.com/pgEdge/pgedge-rag-server.git"
       tag: "v2.0.0"
@@ -310,6 +346,12 @@ sources:
       doc_path: "docs"
       project_name: "Spock"
       project_version: "6.0.0-beta.1"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.14"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.14"
 
     - git_url: "https://github.com/pgEdge/spock.git"
       tag: "v5.0.13"
@@ -412,6 +454,12 @@ sources:
       doc_path: "docs"
       project_name: "pgEdge Control Plane"
       project_version: "0.6.1"
+
+    - git_url: "https://github.com/pgEdge/snowflake.git"
+      tag: "v2.6.1"
+      doc_path: "docs"
+      project_name: "pgEdge Snowflake"
+      project_version: "2.6.1"
 
     - git_url: "https://github.com/pgEdge/snowflake.git"
       tag: "v2.6.0"
@@ -636,6 +684,12 @@ sources:
       project_version: "14.5"
 
     - git_url: "https://github.com/pgEdge/radar.git"
+      tag: "v0.6.3"
+      doc_path: "docs"
+      project_name: "pgEdge Radar"
+      project_version: "0.6.3"
+
+    - git_url: "https://github.com/pgEdge/radar.git"
       tag: "v0.6.2"
       doc_path: "docs"
       project_name: "pgEdge Radar"
@@ -701,6 +755,12 @@ sources:
 
 
     # pgEdge Safe Session — added by auto/sync-kb-builder
+    - git_url: "https://github.com/pgEdge/pgedge-safesession.git"
+      tag: "v1.1"
+      doc_path: "docs"
+      project_name: "pgEdge Safe Session"
+      project_version: "1.1"
+
     - git_url: "https://github.com/pgEdge/pgedge-safesession.git"
       tag: "v1.0"
       doc_path: "docs"
