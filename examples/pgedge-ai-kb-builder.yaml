@@ -94,6 +94,12 @@ sources:
 
 
     - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
+      tag: "v2.0.0-beta1"
+      doc_path: "docs"
+      project_name: "pgEdge AI DBA Workbench"
+      project_version: "2.0.0-beta1"
+
+    - git_url: "https://github.com/pgEdge/ai-dba-workbench.git"
       tag: "v1.0.0"
       doc_path: "docs"
       project_name: "pgEdge AI DBA Workbench"
@@ -287,6 +293,12 @@ sources:
       branch: "main"
       doc_path: "docs/enterprise"
       project_name: "pgEdge Enterprise"
+
+    - git_url: "https://github.com/pgEdge/pgedge-postgres-mcp.git"
+      tag: "v1.2.0-beta1"
+      doc_path: "docs"
+      project_name: "pgEdge Postgres MCP"
+      project_version: "1.2.0-beta1"
 
     - git_url: "https://github.com/pgEdge/pgedge-postgres-mcp.git"
       tag: "v1.1.0"
