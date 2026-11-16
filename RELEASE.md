@@ -5,7 +5,7 @@ Knowledgebase Builder using GoReleaser.
 
 ## Prerequisites
 
-- Go 1.25 or higher
+- Go 1.26.10 or higher on the 1.26 line, or Go 1.27.3 or higher
 - GoReleaser installed (`go install github.com/goreleaser/v2/cmd/goreleaser@latest`)
 - GitHub token with repo write permissions (for creating releases)
 

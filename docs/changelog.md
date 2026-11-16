@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The builder now requires Go 1.26.10 or later (or Go 1.27.3 or later
+  on the 1.27 line), which adds eight compromised eMudhra intermediate
+  CAs to the `crypto/x509` denylist (CVE-2026-111943).
+
 - The chunker now guarantees its hard size limits for every chunk,
   which fixes OpenAI builds failing with "maximum input length is
   8192 tokens". The chunker now recognises HTML tables in Markdown
@@ -50,10 +54,6 @@
 - Existing databases gain a new `gemini_embedding` BLOB column on
   first open via an idempotent `ALTER TABLE`. Old rows have NULL in
   this column until the next build runs with Gemini enabled.
-
-- The minimum required Go toolchain has bumped to 1.26.5; this
-  matches the shared LLM library and patches known standard library
-  CVEs.
 
 - Vulnerable dependencies have been updated to patched releases;
   `golang.org/x/net` moves to 0.55.0, and the documentation tooling
