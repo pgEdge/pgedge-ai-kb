@@ -21,16 +21,22 @@ sources:
       project_name: "PostgreSQL"
       project_version: "14"
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "postgresql19rc2"
-      doc_path: "docs"
-      project_name: "PostgreSQL"
-      project_version: "19rc2"
-
-    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "pgaudit19rc1"
+      branch: "pgaudit190"
       doc_path: "docs"
       project_name: "pgAudit"
-      project_version: "19rc1"
+      project_version: "19.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pg19"
+      doc_path: "docs"
+      project_name: "PostgreSQL"
+      project_version: "19"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit181"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "18.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pg18"
@@ -39,10 +45,22 @@ sources:
       project_version: "18"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit172"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "17.2"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pg17"
       doc_path: "docs"
       project_name: "PostgreSQL"
       project_version: "17"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgaudit162"
+      doc_path: "docs"
+      project_name: "pgAudit"
+      project_version: "16.2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pg16"
@@ -159,6 +177,12 @@ sources:
       project_version: "3.2.2"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgbackrest2601"
+      doc_path: "docs"
+      project_name: "pgBackRest"
+      project_version: "2.60.1"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgbackrest2600"
       doc_path: "docs"
       project_name: "pgBackRest"
@@ -175,6 +199,12 @@ sources:
       doc_path: "docs"
       project_name: "pgBackRest"
       project_version: "2.59.0"
+
+    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
+      branch: "pgstatmonitor241"
+      doc_path: "docs"
+      project_name: "pg_stat_monitor"
+      project_version: "2.4.1"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgstatmonitor240"
@@ -354,10 +384,10 @@ sources:
       project_version: "1.0.0"
 
     - git_url: "https://github.com/pgEdge/spock.git"
-      tag: "v6.0.0-beta.1"
+      tag: "v6.0.0-beta.2"
       doc_path: "docs"
       project_name: "Spock"
-      project_version: "6.0.0-beta.1"
+      project_version: "6.0.0-beta.2"
 
     - git_url: "https://github.com/pgEdge/spock.git"
       tag: "v5.0.14"
@@ -654,24 +684,6 @@ sources:
       project_version: "0.26.0"
 
     - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "pgaudit180"
-      doc_path: "docs"
-      project_name: "pgAudit"
-      project_version: "18.0"
-
-    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "pgaudit171"
-      doc_path: "docs"
-      project_name: "pgAudit"
-      project_version: "17.1"
-
-    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
-      branch: "pgaudit161"
-      doc_path: "docs"
-      project_name: "pgAudit"
-      project_version: "16.1"
-
-    - git_url: "https://github.com/pgEdge/3rd-party-docs.git"
       branch: "pgstatmonitor231"
       doc_path: "docs"
       project_name: "pg_stat_monitor"
@@ -754,10 +766,10 @@ sources:
 
     # pgEdge ColdFront — added by auto/sync-kb-builder
     - git_url: "https://github.com/pgEdge/coldfront.git"
-      tag: "v1.0.0-beta3"
+      tag: "v1.0.0-beta4"
       doc_path: "docs"
       project_name: "pgEdge ColdFront"
-      project_version: "1.0.0-beta3"
+      project_version: "1.0.0-beta4"
 
     - git_url: "https://github.com/pgEdge/coldfront.git"
       tag: "v1.0.0-beta2"
