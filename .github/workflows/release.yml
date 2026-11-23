@@ -542,10 +542,36 @@ jobs:
                       if [ -n "$v2" ]; then AWS="$v2"; fi
                   fi
                   "$AWS" --version
+                  # The CRT transfer client aborts a connection that falls
+                  # below its throughput floor
+                  # (AWS_ERROR_HTTP_CHANNEL_THROUGHPUT_FAILURE), which the
+                  # self-hosted runner's slow uplink trips on multi-GB DBs.
+                  # Force the classic client with few, small parts so each
+                  # part finishes and retries independently.
+                  export AWS_CONFIG_FILE="$RUNNER_TEMP/aws-s3-upload.cfg"
+                  printf '%s\n' \
+                    '[default]' \
+                    'retry_mode = adaptive' \
+                    'max_attempts = 10' \
+                    's3 =' \
+                    '    preferred_transfer_client = classic' \
+                    '    max_concurrent_requests = 4' \
+                    '    multipart_chunksize = 16MB' > "$AWS_CONFIG_FILE"
                   base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}/${PROVIDER}/${KB_TS}"
                   for db in bin/kb-*.db; do
-                      echo "Uploading $(basename "$db") -> ${base}/$(basename "$db")"
-                      "$AWS" s3 cp "$db" "${base}/$(basename "$db")" --only-show-errors
+                      dest="${base}/$(basename "$db")"
+                      echo "Uploading $(basename "$db") -> ${dest}"
+                      # Whole-file retry on top of per-part retries, so a
+                      # transient outage doesn't discard hours of embedding.
+                      ok=false
+                      for attempt in 1 2 3; do
+                          if "$AWS" s3 cp "$db" "$dest" --only-show-errors; then
+                              ok=true; break
+                          fi
+                          echo "::warning::upload attempt ${attempt} failed; retrying in 30s"
+                          sleep 30
+                      done
+                      [ "$ok" = true ] || { echo "::error::upload of $(basename "$db") failed after 3 attempts"; exit 1; }
                   done
                   echo "Uploaded to ${base}/"
 
@@ -559,7 +585,7 @@ jobs:
                     rm -f "$RUNNER_TEMP/ollama.pid"
                   fi
                   rm -rf "$API_KEYS_DIR"
-                  rm -f "$RUNNER_TEMP/gitconfig"
+                  rm -f "$RUNNER_TEMP/gitconfig" "$RUNNER_TEMP/aws-s3-upload.cfg"
 
     discover-kb-db:
         name: Discover latest published kb.db
