@@ -90,11 +90,16 @@ The workflow accepts the following inputs:
   `pgedge-ai-kb-internal` is for testing; `pgedge-ai-kb` is the
   production repository and also receives the `:<tag>-image` tag.
 - `update_latest` also moves `:latest`. The workflow refuses the
-  run unless `source_tag` is the latest GitHub release, so `:latest`
-  never moves backwards.
+  run unless `source_tag` is the latest GitHub release, and checks
+  again just before the push, so `:latest` never moves backwards.
+  Runs that move `:latest` in the same repository run one at a
+  time.
 - `republish` rebuilds the images without cache and replaces tags
   that are already published. Without `republish`, the workflow
-  skips a database whose tags already carry both platforms.
+  skips a database only when every target tag points to the same
+  image and that image carries both platforms. If a target tag
+  points elsewhere, for example an older `latest`, the workflow
+  builds and pushes all target tags.
 - `dbs` lists the database file names to package; the default
   covers every provider.
 

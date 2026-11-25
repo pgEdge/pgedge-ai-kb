@@ -48,8 +48,12 @@ permissions:
     contents: read
     packages: write
 
+# Every run that moves :latest in a repository shares one group, whatever its
+# source_tag, so two promotions can never interleave; the build re-checks the
+# latest release inside that group right before pushing. Runs that leave
+# :latest alone stay parallel per tag.
 concurrency:
-    group: rebuild-kb-images-${{ github.event.inputs.repository }}-${{ github.event.inputs.source_tag }}
+    group: ${{ inputs.update_latest && format('kb-image-build-{0}-latest', inputs.repository) || format('kb-image-build-{0}-{1}', inputs.repository, inputs.source_tag) }}
     cancel-in-progress: false
 
 jobs:
@@ -201,10 +205,23 @@ jobs:
             - name: Build and push multi-arch image
               if: steps.check.outputs.skip != 'true'
               env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
                   DB: ${{ matrix.db }}
+                  SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+                  UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
                   REPUBLISH: ${{ github.event.inputs.republish }}
               run: |
                   set -euo pipefail
+                  # Re-check right before pushing: a newer release may have
+                  # been published since the plan job validated source_tag.
+                  if [ "${UPDATE_LATEST}" = true ]; then
+                      newest="$(gh release view --json tagName -q .tagName)"
+                      if [ "${SOURCE_TAG}" != "${newest}" ]; then
+                          echo "::error::${newest} was released after this run started; refusing to move :latest back to ${SOURCE_TAG}"
+                          exit 1
+                      fi
+                  fi
                   tags=()
                   while read -r ref; do tags+=( -t "${ref}" ); done < target-refs.txt
                   extra=()
