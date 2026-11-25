@@ -91,9 +91,10 @@ The workflow accepts the following inputs:
   production repository and also receives the `:<tag>-image` tag.
 - `update_latest` also moves `:latest`. The workflow refuses the
   run unless `source_tag` is the latest GitHub release, and checks
-  again just before the push, so `:latest` never moves backwards.
-  Runs that move `:latest` in the same repository run one at a
-  time.
+  again just before the push. Runs that move `:latest` in the same
+  repository run one at a time. The release workflow (`release.yml`)
+  also writes `:latest` and does not share this lock, so do not run
+  with `update_latest` while a release is publishing.
 - `republish` rebuilds the images without cache and replaces tags
   that are already published. Without `republish`, the workflow
   skips a database only when every target tag points to the same
