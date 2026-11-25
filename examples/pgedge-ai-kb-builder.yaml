@@ -390,6 +390,12 @@ sources:
       project_version: "6.0.0-beta.2"
 
     - git_url: "https://github.com/pgEdge/spock.git"
+      tag: "v5.0.15"
+      doc_path: "docs"
+      project_name: "Spock"
+      project_version: "5.0.15"
+
+    - git_url: "https://github.com/pgEdge/spock.git"
       tag: "v5.0.14"
       doc_path: "docs"
       project_name: "Spock"
