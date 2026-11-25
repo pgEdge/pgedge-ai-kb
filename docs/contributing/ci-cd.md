@@ -73,6 +73,44 @@ Run the workflow from the GitHub Actions tab. Provide a `branch`
 (default `main`) and a `release_tag` (for example
 `kb-2026-05-15`).
 
+## KB Image Build (`rebuild-kb-images.yml`)
+
+The workflow builds only container images; it does not create a
+release, build any database, or upload to S3. The workflow pulls the
+prebuilt `<db>:<tag>-artifact` files of a given tag from
+`pgedge-ai-kb-artifacts` and packages each file into a `FROM scratch`
+multi-arch image (`linux/amd64` and `linux/arm64`). The workflow is
+triggered manually (`workflow_dispatch`).
+
+The workflow accepts the following inputs:
+
+- `source_tag` names the release whose artifacts to package (for
+  example `v1.0.3`).
+- `repository` names the GHCR repository to push to. The default
+  `pgedge-ai-kb-internal` is for testing; `pgedge-ai-kb` is the
+  production repository and also receives the `:<tag>-image` tag.
+- `update_latest` also moves `:latest`. The workflow refuses the
+  run unless `source_tag` is the latest GitHub release, and checks
+  again just before the push. Runs that move `:latest` in the same
+  repository run one at a time. The release workflow (`release.yml`)
+  also writes `:latest` and does not share this lock, so do not run
+  with `update_latest` while a release is publishing.
+- `republish` rebuilds the images without cache and replaces tags
+  that are already published. Without `republish`, the workflow
+  skips a database only when every target tag points to the same
+  image and that image carries both platforms. If a target tag
+  points elsewhere, for example an older `latest`, the workflow
+  builds and pushes all target tags.
+- `dbs` lists the database file names to package; the default
+  covers every provider.
+
+Each database builds in a separate job; after the push, the job
+fails if any tag is missing either platform.
+
+Run the workflow against `pgedge-ai-kb-internal` first, test the
+images on both architectures, and then run the workflow again with
+`repository` set to `pgedge-ai-kb`.
+
 ## Source Drift Detection (`check-sources.yml`)
 
 The workflow compares `examples/pgedge-ai-kb-builder.yaml` against the
