@@ -1,0 +1,173 @@
+name: Rebuild KB Images (multi-arch)
+
+# Rebuild the FROM-scratch kb.db container images as a multi-arch index
+# (linux/amd64 + linux/arm64) from the raw OCI artifacts an earlier release
+# already pushed to ghcr.io/<owner>/pgedge-ai-kb-artifacts/<db>:<tag>-artifact.
+# Nothing is regenerated: each DB is pulled by digest-verified oras pull and
+# repackaged, so a run takes minutes, not hours.
+#
+# The image holds only a data file (no binaries), so the same layer is valid
+# on every architecture and no QEMU is needed; GHCR stores the layer once.
+#
+#   ghcr.io/<owner>/<repository>/<db>:<tag>      (+ :latest, GA tags only)
+#
+# repository defaults to pgedge-ai-kb-internal for testing. Set it to
+# pgedge-ai-kb to fix the production images; that also pushes the
+# :<tag>-image alias the release workflow publishes there.
+
+on:
+    workflow_dispatch:
+        inputs:
+            source_tag:
+                description: 'Release tag whose -artifact DBs to repackage (e.g. v1.0.3)'
+                required: true
+            repository:
+                description: 'GHCR repository to push to (pgedge-ai-kb = production)'
+                required: true
+                default: 'pgedge-ai-kb-internal'
+            update_latest:
+                description: 'Also move :latest (GA tags only)'
+                required: false
+                type: boolean
+                default: true
+            dbs:
+                description: 'Comma-separated DB file names'
+                required: true
+                default: 'kb-gemini-gemini-embedding-001.db,kb-ollama-nomic-embed-text.db,kb-openai-text-embedding-3-small.db,kb-voyage-voyage-3.db'
+
+permissions:
+    contents: read
+    packages: write
+
+concurrency:
+    group: rebuild-kb-images-${{ github.event.inputs.repository }}-${{ github.event.inputs.source_tag }}
+    cancel-in-progress: false
+
+jobs:
+    plan:
+        name: Validate inputs
+        runs-on: ubuntu-latest
+        outputs:
+            dbs: ${{ steps.plan.outputs.dbs }}
+        steps:
+            - name: Validate inputs and build DB matrix
+              id: plan
+              env:
+                  SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+                  REPOSITORY: ${{ github.event.inputs.repository }}
+                  UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
+                  DBS: ${{ github.event.inputs.dbs }}
+              run: |
+                  set -euo pipefail
+                  if [[ ! "${SOURCE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+                      echo "::error::source_tag '${SOURCE_TAG}' is not a release tag like v1.0.3"
+                      exit 1
+                  fi
+                  if [[ ! "${REPOSITORY}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+                      echo "::error::repository '${REPOSITORY}' must be a lowercase GHCR repo name like pgedge-ai-kb-internal"
+                      exit 1
+                  fi
+                  if [ "${UPDATE_LATEST}" = true ]; then
+                      case "${SOURCE_TAG}" in *-*)
+                          echo "::error:::latest only moves on a GA tag; '${SOURCE_TAG}' is a pre-release"
+                          exit 1 ;;
+                      esac
+                  fi
+                  json="["
+                  IFS=',' read -ra items <<< "${DBS}"
+                  for db in "${items[@]}"; do
+                      db="$(echo "${db}" | tr -d '[:space:]')"
+                      [ -n "${db}" ] || continue
+                      if [[ ! "${db}" =~ ^kb-[a-z0-9.-]+\.db$ ]]; then
+                          echo "::error::invalid DB name '${db}'"
+                          exit 1
+                      fi
+                      json+="\"${db}\","
+                  done
+                  json="${json%,}]"
+                  [ "${json}" != "[]" ] || { echo "::error::no DBs given"; exit 1; }
+                  echo "dbs=${json}" >> "${GITHUB_OUTPUT}"
+                  echo "Rebuilding ${json} from ${SOURCE_TAG} -> ghcr.io/.../${REPOSITORY}/<db> (latest=${UPDATE_LATEST})"
+
+    build:
+        name: Build ${{ matrix.db }}
+        needs: plan
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                db: ${{ fromJSON(needs.plan.outputs.dbs) }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Install oras
+              uses: ./.github/actions/setup-oras
+
+            # docker-container driver: the default docker driver cannot build
+            # a multi-platform index.
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+            - name: Log in to GHCR
+              env:
+                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+                  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+            - name: Pull ${{ matrix.db }} from the release artifact
+              env:
+                  DB: ${{ matrix.db }}
+                  SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  src="ghcr.io/${owner}/pgedge-ai-kb-artifacts/${DB}:${SOURCE_TAG}-artifact"
+                  mkdir -p ctx
+                  echo "Pulling ${src}"
+                  oras pull -o ctx "${src}"
+                  [ -s "ctx/${DB}" ] || { echo "::error::${src} did not contain ${DB}"; ls -la ctx; exit 1; }
+                  ls -la ctx
+                  sha256sum "ctx/${DB}"
+
+            - name: Build and push multi-arch image
+              env:
+                  DB: ${{ matrix.db }}
+                  SOURCE_TAG: ${{ github.event.inputs.source_tag }}
+                  REPOSITORY: ${{ github.event.inputs.repository }}
+                  UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
+              run: |
+                  set -euo pipefail
+                  owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
+                  img="ghcr.io/${owner}/${REPOSITORY}/${DB}"
+                  tags=( -t "${img}:${SOURCE_TAG}" )
+                  # Production also carries the :<tag>-image alias release.yml publishes.
+                  if [ "${REPOSITORY}" = pgedge-ai-kb ]; then tags+=( -t "${img}:${SOURCE_TAG}-image" ); fi
+                  if [ "${UPDATE_LATEST}" = true ]; then tags+=( -t "${img}:latest" ); fi
+                  echo "Pushing: ${tags[*]}"
+                  # --provenance/--sbom=false keep the index to the two real
+                  # platforms (no unknown/unknown attestation entry).
+                  docker buildx build \
+                      --platform linux/amd64,linux/arm64 \
+                      --provenance=false --sbom=false \
+                      --build-arg DB="${DB}" \
+                      -f docker/Dockerfile \
+                      "${tags[@]}" \
+                      --push \
+                      ctx
+                  printf '%s\n' "${tags[@]}" | grep -v '^-t$' > pushed-tags.txt
+
+            - name: Verify both platforms are published
+              run: |
+                  set -euo pipefail
+                  while read -r ref; do
+                      echo "== ${ref}"
+                      out="$(docker buildx imagetools inspect "${ref}")"
+                      echo "${out}"
+                      for p in linux/amd64 linux/arm64; do
+                          echo "${out}" | grep -q "Platform:[[:space:]]*${p}$" || {
+                              echo "::error::${ref} is missing ${p}"; exit 1; }
+                      done
+                  done < pushed-tags.txt
