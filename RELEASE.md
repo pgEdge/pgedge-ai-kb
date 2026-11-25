@@ -64,6 +64,13 @@ The `release.yml` workflow runs on tag push. It:
 4. Generates a checksums file.
 5. Creates a GitHub Release with auto-generated notes.
 
+The workflow also pushes each knowledgebase database to GHCR as a raw
+OCI artifact (`pgedge-ai-kb-artifacts/<db>:<tag>-artifact`), but it
+does not build container images. After the release finishes, run the
+KB Image Build workflow (`rebuild-kb-images.yml`) with `source_tag`
+set to the new tag to publish the multi-arch images; see
+[CI/CD](docs/contributing/ci-cd.md).
+
 ## Building the Knowledgebase Database
 
 The `release-kb.yml` workflow is triggered manually
