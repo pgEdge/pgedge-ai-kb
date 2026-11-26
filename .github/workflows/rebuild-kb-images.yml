@@ -11,9 +11,10 @@ name: KB Image Build
 #
 #   ghcr.io/<owner>/<repository>/<db>:<tag>      (+ :latest when requested)
 #
-# repository defaults to pgedge-ai-kb-internal for testing. Set it to
-# pgedge-ai-kb to fix the production images; that also pushes the
-# :<tag>-image alias the release workflow publishes there.
+# This is the only workflow that publishes KB images; release.yml pushes
+# just the -artifact files. repository defaults to pgedge-ai-kb-internal
+# for testing. Set it to pgedge-ai-kb to publish the production images;
+# that also pushes the :<tag>-image alias earlier releases published there.
 #
 # A DB whose tags are all already published for both platforms is skipped
 # unless republish is set; republish rebuilds it without cache and pushes
@@ -149,7 +150,7 @@ jobs:
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
                   img="ghcr.io/${owner}/${REPOSITORY}/${DB}"
                   refs=( "${img}:${SOURCE_TAG}" )
-                  # Production also carries the :<tag>-image alias release.yml publishes.
+                  # Production keeps the :<tag>-image alias earlier releases published.
                   if [ "${REPOSITORY}" = pgedge-ai-kb ]; then refs+=( "${img}:${SOURCE_TAG}-image" ); fi
                   if [ "${UPDATE_LATEST}" = true ]; then refs+=( "${img}:latest" ); fi
                   printf '%s\n' "${refs[@]}" > target-refs.txt

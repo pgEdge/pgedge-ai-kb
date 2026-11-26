@@ -287,10 +287,10 @@ jobs:
     # workflow run. Both upload one DB per provider to the S3 backup bucket at
     #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
     # (this replaces the flaky, 2 GB-capped actions/upload-artifact hand-off).
-    # validate-kb-db then pulls them, gates packaging, and pushes them to GHCR
-    # once from a reliable GH-hosted runner. The set of DB basenames + the
-    # shared kb-timestamp are defined once in kb-matrix and read back by the
-    # packaging jobs.
+    # validate-kb-db then pulls them and gates packaging; publish-kb-artifacts
+    # pushes them to GHCR once from a reliable GH-hosted runner. The set of
+    # DB basenames + the shared kb-timestamp are defined once in kb-matrix
+    # and read back by the packaging jobs.
     # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
@@ -493,8 +493,8 @@ jobs:
             # Each cell uploads its DB to the S3 backup bucket — S3 multipart
             # tolerates the self-hosted runner's slow uplink, unlike oras's
             # monolithic PUT (which failed at ~0.27 MB/s -> 400). GHCR is NOT
-            # pushed from here: validate-kb-db pushes to GHCR once, from a
-            # reliable GH-hosted runner. S3 layout:
+            # pushed from here: publish-kb-artifacts pushes to GHCR once,
+            # from a reliable GH-hosted runner. S3 layout:
             #   <repo_type>/pgedge-ai-kb/<tag>/<provider>/<kb-timestamp>/<db>
             # AWS CLI is preinstalled on the cloud (ubuntu) cells; only the
             # self-hosted ollama runner needs it — and its Homebrew Python is
@@ -635,8 +635,8 @@ jobs:
 
             # Upload to the S3 backup bucket in the same layout as
             # generate-kb-db so the packaging jobs pull uniformly (GHCR is
-            # pushed later, once, from validate-kb-db). Provider is parsed from
-            # each filename (kb-<provider>-<model>.db).
+            # pushed later, once, from publish-kb-artifacts). Provider is
+            # parsed from each filename (kb-<provider>-<model>.db).
             - name: Upload kb.db to S3 backup bucket
               env:
                   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -656,7 +656,7 @@ jobs:
                   done
 
     validate-kb-db:
-        name: Validate & publish kb.db (GHCR artifacts + images)
+        name: Validate kb.db
         runs-on: ubuntu-latest
         # Gate downstream packaging. Runs after whichever upstream produced
         # the artifact; downstream `needs: validate-kb-db` ensures sequencing.
@@ -768,21 +768,58 @@ jobs:
                       echo "${db} validation passed"
                   done
 
-            # Publish to GHCR HERE — once, from this reliable GitHub-hosted
-            # runner that already has every validated DB — rather than from the
-            # slow self-hosted generate cell. Two forms, in separate repos:
-            #   * raw OCI artifact -> pgedge-ai-kb-artifacts/<db>:<tag>-artifact
-            #   * container image  -> pgedge-ai-kb/<db>:<tag>-image, :<tag>,
-            #                         and :latest (final GA only)
-            # The image (FROM scratch + the db) is what drydock mounts via
-            # Image Volume Source; :<tag> and :latest track the IMAGE. :latest
-            # moves only on a final GA tag (no -test/-dev/-rc/-beta/-alpha).
-            # continue-on-error: a GHCR hiccup must never block packaging (S3).
+    # -------------------------------------------------------------------------
+    # GHCR artifact publish
+    # -------------------------------------------------------------------------
+    # Pushes each validated DB to GHCR once, from a reliable GitHub-hosted
+    # runner, as a raw OCI artifact:
+    #   pgedge-ai-kb-artifacts/<db>:<tag>-artifact
+    # Container images are NOT built here: the KB Image Build workflow
+    # (rebuild-kb-images.yml) packages these artifacts into multi-arch images
+    # (linux/amd64 + linux/arm64). This is a separate job, not a step in
+    # validate-kb-db, so a GHCR outage never blocks the binary release or OS
+    # packaging, neither of which needs GHCR. It has no continue-on-error:
+    # images can only be built from these artifacts, so a failed push turns
+    # the run red and this job can be re-run on its own.
+    publish-kb-artifacts:
+        name: Publish kb.db to GHCR (artifacts)
+        needs: [determine-repo-type, validate-kb-db]
+        # always() + explicit needs check: validate-kb-db has an OR'd
+        # dependency, so the default success() check would see its SKIPPED
+        # upstream branch and skip this job.
+        if: |
+            always() &&
+            needs.determine-repo-type.result == 'success' &&
+            needs.validate-kb-db.result == 'success'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+            - name: Pull validated kb.db from S3 backup bucket
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  S3_BACKUP_BUCKET: ${{ secrets.S3_BACKUP_BUCKET_NAME }}
+                  REPO_TYPE: ${{ needs.determine-repo-type.outputs.repo-type }}
+                  TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
+                  KB_TS: ${{ needs.validate-kb-db.outputs.kb-timestamp }}
+                  DB_NAMES: ${{ needs.validate-kb-db.outputs.db-names }}
+              run: |
+                  set -euo pipefail
+                  base="s3://${S3_BACKUP_BUCKET}/${REPO_TYPE}/pgedge-ai-kb/${TAG}"
+                  mkdir -p kb.db.cached
+                  for name in ${DB_NAMES}; do
+                      p="${name#kb-}"; p="${p%%-*}"   # provider = first token after kb-
+                      echo "Pulling ${base}/${p}/${KB_TS}/${name}"
+                      aws s3 cp "${base}/${p}/${KB_TS}/${name}" "kb.db.cached/${name}" --only-show-errors
+                  done
+                  ls -lh kb.db.cached/
+
             - name: Install oras
               uses: ./.github/actions/setup-oras
 
-            - name: Publish kb.db to GHCR (artifacts + images)
-              continue-on-error: true
+            - name: Publish kb.db to GHCR (artifacts)
               env:
                   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   TAG: ${{ needs.determine-repo-type.outputs.effective-tag }}
@@ -790,29 +827,14 @@ jobs:
                   set -euo pipefail
                   owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')"
                   art_ns="ghcr.io/${owner}/pgedge-ai-kb-artifacts"
-                  img_ns="ghcr.io/${owner}/pgedge-ai-kb"
                   echo "${GHCR_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-                  # Final GA = no pre-release suffix (no '-' in the tag).
-                  final=false; case "${TAG}" in *-*) : ;; *) final=true ;; esac
                   for db in kb.db.cached/kb-*.db; do
                       name="$(basename "$db")"
-
-                      # 1) raw OCI artifact (never tagged plain :<tag>)
+                      # Raw OCI artifact (never tagged plain :<tag>)
                       echo "Artifact -> ${art_ns}/${name}:${TAG}-artifact"
                       ( cd kb.db.cached && oras push "${art_ns}/${name}:${TAG}-artifact" \
                           --artifact-type application/vnd.pgedge.kb.sqlite.v1 \
                           "${name}:application/vnd.sqlite3" )
-
-                      # 2) container image: :<tag>-image + :<tag> (+ :latest on GA)
-                      img="${img_ns}/${name}"
-                      tags=( -t "${img}:${TAG}-image" -t "${img}:${TAG}" )
-                      if [ "${final}" = true ]; then tags+=( -t "${img}:latest" ); fi
-                      echo "Image -> ${img}:${TAG}-image, :${TAG} (latest=${final})"
-                      docker build --build-arg DB="${name}" -f docker/Dockerfile "${tags[@]}" kb.db.cached
-                      docker push "${img}:${TAG}-image"
-                      docker push "${img}:${TAG}"
-                      if [ "${final}" = true ]; then docker push "${img}:latest"; fi
                   done
 
     # -------------------------------------------------------------------------

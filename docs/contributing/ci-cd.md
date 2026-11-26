@@ -82,6 +82,10 @@ prebuilt `<db>:<tag>-artifact` files of a given tag from
 multi-arch image (`linux/amd64` and `linux/arm64`). The workflow is
 triggered manually (`workflow_dispatch`).
 
+The binary release workflow (`release.yml`) publishes only the
+`-artifact` files and does not build container images. Run this
+workflow after each release to publish the release's images.
+
 The workflow accepts the following inputs:
 
 - `source_tag` names the release whose artifacts to package (for
@@ -92,9 +96,7 @@ The workflow accepts the following inputs:
 - `update_latest` also moves `:latest`. The workflow refuses the
   run unless `source_tag` is the latest GitHub release, and checks
   again just before the push. Runs that move `:latest` in the same
-  repository run one at a time. The release workflow (`release.yml`)
-  also writes `:latest` and does not share this lock, so do not run
-  with `update_latest` while a release is publishing.
+  repository run one at a time.
 - `republish` rebuilds the images without cache and replaces tags
   that are already published. Without `republish`, the workflow
   skips a database only when every target tag points to the same
