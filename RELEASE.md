@@ -66,10 +66,17 @@ The `release.yml` workflow runs on tag push. It:
 
 The workflow also pushes each knowledgebase database to GHCR as a raw
 OCI artifact (`pgedge-ai-kb-artifacts/<db>:<tag>-artifact`), but it
-does not build container images. After the release finishes, run the
-KB Image Build workflow (`rebuild-kb-images.yml`) with `source_tag`
-set to the new tag to publish the multi-arch images; see
-[CI/CD](docs/contributing/ci-cd.md).
+does not build container images. After the release finishes, publish
+the multi-arch images with the KB Image Build workflow
+(`rebuild-kb-images.yml`) in two steps; see
+[CI/CD](docs/contributing/ci-cd.md) for every input.
+
+1. Run the workflow with `source_tag` set to the new tag; the default
+   `repository` builds internal images in `pgedge-ai-kb-internal` for
+   testing.
+2. After testing passes, run the workflow again with the same
+   `source_tag` and `repository` set to `pgedge-ai-kb`; enable
+   `update_latest` if `:latest` should move to the new release.
 
 ## Building the Knowledgebase Database
 
